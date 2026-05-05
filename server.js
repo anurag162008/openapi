@@ -15,6 +15,9 @@ const NVIDIA_BASE = 'https://integrate.api.nvidia.com/v1';
 const ENV_FILE = path.join(__dirname, '.env');
 const PIPELINES_FILE = path.join(__dirname, 'pipelines.json');
 const MAX_LOGS = 1000;
+const PIPELINE_MAX_CONCURRENCY = parseInt(process.env.PIPELINE_MAX_CONCURRENCY || '3');
+const PIPELINE_PLANNER_TIMEOUT_MS = parseInt(process.env.PIPELINE_PLANNER_TIMEOUT_MS || '90000');
+const PIPELINE_SUBTASK_TIMEOUT_MS = parseInt(process.env.PIPELINE_SUBTASK_TIMEOUT_MS || '90000');
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let keys = [];          // { id, value, label, active, addedAt, stats }
@@ -23,6 +26,7 @@ let logs = [];
 let logIdCounter = 0;
 let requestCounter = 0;
 let pipelines = [];     // { id, name, slug, models:{planner,synthesizer,...}, maxSubtasks, createdAt, stats }
+const pipelineConcurrency = new Map();
 
 // ─── .env loader/saver ────────────────────────────────────────────────────────
 function loadKeysFromEnv() {
@@ -115,7 +119,7 @@ function recordKeyUsage(id, result, extra = {}) {
 
 // ─── Internal Model Caller ────────────────────────────────────────────────────
 // Non-streaming call to any NVIDIA model with key rotation + retry
-async function callModel(modelId, messages, maxTokens = 2048) {
+async function callModel(modelId, messages, maxTokens = 2048, timeoutMs = 90000) {
   const triedIds = [];
   let lastError = 'No active keys';
   for (let attempt = 0; attempt < Math.min(keys.length || 1, 3); attempt++) {
@@ -124,7 +128,7 @@ async function callModel(modelId, messages, maxTokens = 2048) {
     triedIds.push(key.id);
     try {
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 90000);
+      const timer = setTimeout(() => ctrl.abort(), timeoutMs);
       const res = await fetch(`${NVIDIA_BASE}/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key.value}` },
@@ -143,6 +147,21 @@ async function callModel(modelId, messages, maxTokens = 2048) {
     }
   }
   throw new Error(`callModel(${modelId}) failed: ${lastError}`);
+}
+
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function callModelWithRetry(modelId, messages, maxTokens = 2048, retries = 2, timeoutMs = 90000) {
+  let lastErr = null;
+  for (let i = 0; i <= retries; i++) {
+    try { return await callModel(modelId, messages, maxTokens, timeoutMs); }
+    catch (e) {
+      lastErr = e;
+      if (i < retries) await sleep(250 * (2 ** i));
+    }
+  }
+  throw lastErr || new Error('Unknown model call failure');
 }
 
 // ─── Pipeline Manager ─────────────────────────────────────────────────────────
@@ -179,6 +198,12 @@ Format the answer clearly and practically for the user.`;
 
 async function runPipeline(pipeline, messages, clientRes) {
   const startTime = Date.now();
+  const activeForPipeline = pipelineConcurrency.get(pipeline.id) || 0;
+  if (activeForPipeline >= PIPELINE_MAX_CONCURRENCY) {
+    clientRes.status(429).json({ error: { message: `Pipeline busy (max ${PIPELINE_MAX_CONCURRENCY} concurrent runs). Try again shortly.`, type: 'proxy_error', code: 'pipeline_concurrency_limit' } });
+    return;
+  }
+  pipelineConcurrency.set(pipeline.id, activeForPipeline + 1);
 
   function sse(eventName, data) {
     clientRes.write(`event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -199,11 +224,13 @@ async function runPipeline(pipeline, messages, clientRes) {
 
     let plan = [];
     const enabledTasks = (pipeline.enabledTasks && typeof pipeline.enabledTasks === 'object') ? pipeline.enabledTasks : Object.fromEntries(Object.keys(PIPELINE_DEFAULT_MODELS).filter(t => !['planner', 'synthesizer'].includes(t)).map(t => [t, true]));
+    const enabledCustomTasks = (pipeline.customTasks || []).filter(t => t && t.enabled !== false && t.id && t.model);
+    const enabledCustomIds = enabledCustomTasks.map(t => t.id);
     try {
-      const planText = await callModel(pipeline.models.planner, [
-        { role: 'system', content: `${PLANNER_SYSTEM}\n\nEnabled task types for this pipeline: ${Object.entries(enabledTasks).filter(([, on]) => !!on).map(([k]) => k).join(', ') || 'general'}.\nOnly emit types from enabled task types.` },
+      const planText = await callModelWithRetry(pipeline.models.planner, [
+        { role: 'system', content: `${PLANNER_SYSTEM}\n\nEnabled task types for this pipeline: ${Object.entries(enabledTasks).filter(([, on]) => !!on).map(([k]) => k).join(', ') || 'general'}${enabledCustomIds.length ? `, ${enabledCustomIds.join(', ')}` : ''}.\nOnly emit types from enabled task types.` },
         ...messages
-      ], 1024);
+      ], 1024, 2, PIPELINE_PLANNER_TIMEOUT_MS);
       const jsonMatch = planText.match(/\[[\s\S]*\]/);
       plan = JSON.parse(jsonMatch ? jsonMatch[0] : planText);
       if (!Array.isArray(plan) || plan.length === 0) throw new Error('empty plan');
@@ -213,7 +240,7 @@ async function runPipeline(pipeline, messages, clientRes) {
     }
 
     // Cap subtasks
-    const allowedTypesSet = new Set(Object.entries(enabledTasks).filter(([, on]) => !!on).map(([k]) => k));
+    const allowedTypesSet = new Set([...Object.entries(enabledTasks).filter(([, on]) => !!on).map(([k]) => k), ...enabledCustomIds]);
     plan = plan.map(p => ({ ...p, type: (p?.type || 'general').toString().toLowerCase() })).filter(p => allowedTypesSet.has(p.type)).slice(0, pipeline.maxSubtasks || 5);
     if (!plan.length) plan = [{ type: 'general', label: 'Main task', prompt: originalRequest }];
     sse('pipeline_status', { step: 'plan_ready', subtasks: plan.map(p => ({ type: p.type, label: p.label })) });
@@ -221,14 +248,15 @@ async function runPipeline(pipeline, messages, clientRes) {
 
     // ── Step 2: Execute subtasks in parallel ───────────────────────────────
     const results = await Promise.all(plan.map(async (subtask, idx) => {
-      const modelId = pipeline.models[subtask.type] || pipeline.models.general;
+      const customTask = enabledCustomTasks.find(t => t.id === subtask.type);
+      const modelId = customTask?.model || pipeline.models[subtask.type] || pipeline.models.general;
       sse('pipeline_status', { step: 'executing', index: idx, type: subtask.type, label: subtask.label, model: modelId });
       console.log(`[pipeline:${pipeline.slug}] Subtask[${idx}] ${subtask.type} → ${modelId}`);
       try {
-        const result = await callModel(modelId, [
+        const result = await callModelWithRetry(modelId, [
           ...messages.filter(m => m.role === 'system'),
           { role: 'user', content: subtask.prompt }
-        ], 2048);
+        ], 2048, 2, PIPELINE_SUBTASK_TIMEOUT_MS);
         sse('pipeline_status', { step: 'subtask_done', index: idx, type: subtask.type, label: subtask.label, chars: result.length });
         return { type: subtask.type, label: subtask.label, model: modelId, result, ok: true };
       } catch (e) {
@@ -316,6 +344,9 @@ async function runPipeline(pipeline, messages, clientRes) {
       clientRes.write(`data: ${errChunk}\n\ndata: [DONE]\n\n`);
       clientRes.end();
     }
+  } finally {
+    const active = pipelineConcurrency.get(pipeline.id) || 1;
+    pipelineConcurrency.set(pipeline.id, Math.max(0, active - 1));
   }
 }
 
@@ -704,7 +735,14 @@ app.get('/v1/models', (req, res) => {
 });
 
 app.get('/api/models', (req, res) => {
-  let result = NVIDIA_FREE_MODELS;
+  let result = [...NVIDIA_FREE_MODELS, ...pipelines.map(p => ({
+    id: `pipeline/${p.slug}`,
+    name: `[Pipeline] ${p.name}`,
+    org: 'pipeline',
+    category: 'pipeline',
+    ctx: 131072,
+    free: true
+  }))];
   if (req.query.q) {
     const q = req.query.q.toLowerCase();
     result = result.filter(m =>
@@ -929,7 +967,8 @@ async function proxyToNvidia(req, res, endpoint) {
           }
         } catch (_) {
           // Client disconnected mid-stream
-        } finally {
+        addLog({ method: 'META', endpoint: '/pipeline/run', event: 'pipeline_run_finished', model: `pipeline/${pipeline.slug}`, statusCode: 200, latencyMs: Date.now() - startTime });
+  } finally {
           res.off('close', onStreamClose);
           res.end();
         }
@@ -1074,11 +1113,23 @@ const PIPELINE_DEFAULT_MODELS = {
   translation:   'meta/llama-3.3-70b-instruct',
   factual:       'meta/llama-3.1-8b-instruct',
 };
+const PIPELINE_TASK_TYPES = Object.keys(PIPELINE_DEFAULT_MODELS).filter(t => !['planner', 'synthesizer'].includes(t));
+function normalizeCustomTasks(arr = []) {
+  if (!Array.isArray(arr)) return [];
+  return arr.map((t, i) => ({
+    id: String(t?.id || '').toLowerCase().replace(/[^a-z0-9-_]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32) || `custom-${i + 1}`,
+    label: String(t?.label || t?.id || `Custom ${i + 1}`).slice(0, 60),
+    model: String(t?.model || '').trim(),
+    instruction: String(t?.instruction || '').slice(0, 400),
+    enabled: t?.enabled !== false
+  })).filter(t => t.model);
+}
+
 
 app.get('/api/pipelines', (req, res) => res.json(pipelines));
 
 app.post('/api/pipelines', (req, res) => {
-  const { name, slug, models, maxSubtasks } = req.body;
+  const { name, slug, models, maxSubtasks, enabledTasks, customTasks } = req.body;
   if (!name || !slug) return res.status(400).json({ error: 'name and slug are required' });
   if (!/^[a-z0-9-]+$/.test(slug)) return res.status(400).json({ error: 'slug: only lowercase, numbers, hyphens' });
   if (pipelines.find(p => p.slug === slug)) return res.status(409).json({ error: `Slug '${slug}' already exists` });
@@ -1093,7 +1144,8 @@ app.post('/api/pipelines', (req, res) => {
     name: name.trim(),
     slug: slug.trim(),
     models: pipelineModels,
-    enabledTasks: Object.fromEntries(Object.keys(PIPELINE_DEFAULT_MODELS).filter(t => !['planner', 'synthesizer'].includes(t)).map(t => [t, true])),
+    enabledTasks: Object.fromEntries(PIPELINE_TASK_TYPES.map(t => [t, typeof enabledTasks?.[t] === 'boolean' ? enabledTasks[t] : true])),
+    customTasks: normalizeCustomTasks(customTasks),
     maxSubtasks: Math.min(Math.max(parseInt(maxSubtasks) || 4, 2), 8),
     createdAt: new Date().toISOString(),
     stats: { total: 0, totalSubtasks: 0, avgSubtasks: 0, lastUsed: null }
@@ -1112,11 +1164,11 @@ app.patch('/api/pipelines/:id', (req, res) => {
   if (req.body.models && typeof req.body.models === 'object') Object.assign(pipeline.models, req.body.models);
   if (req.body.enabledTasks && typeof req.body.enabledTasks === 'object') {
     pipeline.enabledTasks = pipeline.enabledTasks || {};
-    for (const t of Object.keys(PIPELINE_DEFAULT_MODELS)) {
-      if (t === 'planner' || t === 'synthesizer') continue;
+    for (const t of PIPELINE_TASK_TYPES) {
       if (typeof req.body.enabledTasks[t] === 'boolean') pipeline.enabledTasks[t] = req.body.enabledTasks[t];
     }
   }
+  if (req.body.customTasks) pipeline.customTasks = normalizeCustomTasks(req.body.customTasks);
   savePipelines();
   res.json({ ok: true, pipeline });
 });

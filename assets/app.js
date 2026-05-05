@@ -5,6 +5,7 @@ let chatHistory = [];
 let useStream = true;
 let autoRefresh = true;
 let autoRefreshTimer = null;
+let lastArenaResults = [];
 let lastLogId = 0;
 const CHAT_STORAGE_KEY = 'nim_proxy_chat_history_v1';
 
@@ -250,7 +251,8 @@ function copyModelId() {
 function populateChatModelSelect(models) {
   const sel = document.getElementById('chat-model');
   sel.innerHTML = models.map(m => `<option value="${esc(m.id)}">${esc(m.name)} — ${esc(m.id)}</option>`).join('');
-  sel.value = 'meta/llama-3.3-70b-instruct';
+if (models.find(m => m.id === selectedModelId)) sel.value = selectedModelId;
+  else sel.value = models.find(m => m.id === 'meta/llama-3.3-70b-instruct') ? 'meta/llama-3.3-70b-instruct' : (models[0]?.id || '');
 }
 
 // ─── Chat ──────────────────────────────────────────────────────────────────
@@ -657,11 +659,13 @@ async function showPipelineForm(pipeline = null) {
     document.getElementById('pf-slug').value = pipeline.slug;
     document.getElementById('pf-max').value = pipeline.maxSubtasks || 4;
     document.getElementById('pf-slug').dataset.editId = pipeline.id;
+    document.getElementById('pf-custom-tasks').value = JSON.stringify(pipeline.customTasks || [], null, 2);
   } else {
     document.getElementById('pf-name').value = '';
     document.getElementById('pf-slug').value = '';
     document.getElementById('pf-max').value = '4';
     delete document.getElementById('pf-slug').dataset.editId;
+    document.getElementById('pf-custom-tasks').value = '[]';
   }
   document.getElementById('pf-name').focus();
   document.getElementById('pipeline-form').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -689,6 +693,8 @@ async function createPipeline() {
 
   const models = {};
   const enabledTasks = {};
+  let customTasks = [];
+  try { customTasks = JSON.parse(document.getElementById('pf-custom-tasks').value || '[]'); if (!Array.isArray(customTasks)) throw new Error('invalid'); } catch { return toast('Custom tasks must be valid JSON array', 'error'); }
   ['planner', 'synthesizer', ...Object.keys(TASK_CONFIG)].forEach(type => {
     const sel = document.getElementById('pf-' + type);
     if (sel) models[type] = sel.value;
@@ -698,10 +704,10 @@ async function createPipeline() {
 
   try {
     if (editId) {
-      await api('/api/pipelines/' + editId, 'PATCH', { name, maxSubtasks, models, enabledTasks });
+      await api('/api/pipelines/' + editId, 'PATCH', { name, maxSubtasks, models, enabledTasks, customTasks });
       toast('Pipeline updated ✓', 'success');
     } else {
-      await api('/api/pipelines', 'POST', { name, slug, maxSubtasks, models, enabledTasks });
+      await api('/api/pipelines', 'POST', { name, slug, maxSubtasks, models, enabledTasks, customTasks });
       toast('Pipeline created ✓', 'success');
     }
     hidePipelineForm();
@@ -745,7 +751,8 @@ async function runArena() {
       return { model, ms: Date.now() - t0, ok: false, text: e.message };
     }
   }));
-  out.innerHTML = results.map(r => `<div class="card"><div class="card-title">${esc(r.model)} · ${r.ms}ms · ${r.ok ? 'OK' : 'ERR'}</div><pre>${esc(r.text)}</pre></div>`).join('');
+  lastArenaResults = results;
+  out.innerHTML = results.map(r => `<div class=\"card\"><div class=\"card-title\">${esc(r.model)} · ${r.ms}ms · ${r.ok ? 'OK' : 'ERR'}</div><pre>${esc(r.text)}</pre></div>`).join('');
 }
 
 function clearArena() {
@@ -1097,4 +1104,21 @@ async function deleteRouter(id) {
 
 function copyText(text, msg) {
   navigator.clipboard.writeText(text).then(() => toast(msg || 'Copied!', 'success')).catch(() => toast('Copy failed', 'error'));
+}
+
+
+function copyArenaResults() {
+  if (!lastArenaResults.length) return toast('No arena results', 'error');
+  const txt = lastArenaResults.map(r => `Model: ${r.model}\nLatency: ${r.ms}ms\nStatus: ${r.ok ? 'OK' : 'ERR'}\n\n${r.text}`).join('\n\n---\n\n');
+  navigator.clipboard.writeText(txt).then(() => toast('Arena results copied ✓', 'success'));
+}
+
+function exportArenaResults() {
+  if (!lastArenaResults.length) return toast('No arena results', 'error');
+  const blob = new Blob([JSON.stringify({ generatedAt: new Date().toISOString(), results: lastArenaResults }, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `arena-results-${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.json`;
+  a.click();
+  toast('Arena results exported ✓', 'success');
 }
