@@ -6,6 +6,7 @@ let useStream = true;
 let autoRefresh = true;
 let autoRefreshTimer = null;
 let lastArenaResults = [];
+let arenaUseStream = false;
 let lastLogId = 0;
 const CHAT_STORAGE_KEY = 'nim_proxy_chat_history_v1';
 
@@ -736,23 +737,9 @@ async function runArena() {
   const models = ['arena-model-1', 'arena-model-2', 'arena-model-3'].map(id => document.getElementById(id)?.value).filter(Boolean);
   if (!models.length) return toast('Select at least one model', 'error');
   const out = document.getElementById('arena-results');
-  out.innerHTML = '<div class="card">Running arena...</div>';
-  const results = await Promise.all(models.map(async model => {
-    const t0 = Date.now();
-    try {
-      const res = await fetch('/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer proxy' },
-        body: JSON.stringify({ model, stream: false, messages: [{ role: 'user', content: prompt }] })
-      });
-      const data = await res.json();
-      return { model, ms: Date.now() - t0, ok: res.ok, text: data.choices?.[0]?.message?.content || data.error?.message || '(empty)' };
-    } catch (e) {
-      return { model, ms: Date.now() - t0, ok: false, text: e.message };
-    }
-  }));
-  lastArenaResults = results;
-  out.innerHTML = results.map(r => `<div class=\"card\"><div class=\"card-title\">${esc(r.model)} · ${r.ms}ms · ${r.ok ? 'OK' : 'ERR'}</div><pre>${esc(r.text)}</pre></div>`).join('');
+  lastArenaResults = models.map(model => ({ model, ms: 0, ok: false, text: 'Running...' }));
+  out.innerHTML = models.map((model, i) => `<div class="card" id="arena-card-${i}"><div class="card-title">${esc(model)} · running...</div><pre id="arena-pre-${i}">Waiting for response...</pre></div>`).join('');
+  await Promise.all(models.map((model, i) => runArenaForModel(model, prompt, i)));
 }
 
 function clearArena() {
@@ -760,6 +747,62 @@ function clearArena() {
   const out = document.getElementById('arena-results');
   if (input) input.value = '';
   if (out) out.innerHTML = '';
+  lastArenaResults = [];
+}
+
+function toggleArenaStream() {
+  arenaUseStream = !arenaUseStream;
+  const btn = document.getElementById('arena-stream-btn');
+  if (btn) btn.textContent = 'Arena Stream: ' + (arenaUseStream ? 'ON' : 'OFF');
+}
+
+async function runArenaForModel(model, prompt, idx) {
+  const t0 = Date.now();
+  const card = document.getElementById(`arena-card-${idx}`);
+  const pre = document.getElementById(`arena-pre-${idx}`);
+  try {
+    const res = await fetch('/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer proxy' },
+      body: JSON.stringify({ model, stream: arenaUseStream, messages: [{ role: 'user', content: prompt }] })
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      const text = err.error?.message || JSON.stringify(err) || 'Request failed';
+      updateArenaCard(idx, model, false, Date.now() - t0, text);
+      return;
+    }
+    if (!arenaUseStream) {
+      const data = await res.json();
+      const text = data.choices?.[0]?.message?.content || '(empty)';
+      updateArenaCard(idx, model, true, Date.now() - t0, text);
+      return;
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let full = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value);
+      for (const line of chunk.split('\n')) {
+        if (!line.startsWith('data: ') || line === 'data: [DONE]') continue;
+        try { full += JSON.parse(line.slice(6)).choices?.[0]?.delta?.content || ''; } catch {}
+      }
+      if (pre) pre.textContent = full || '...';
+    }
+    updateArenaCard(idx, model, true, Date.now() - t0, full || '(empty)');
+  } catch (e) {
+    updateArenaCard(idx, model, false, Date.now() - t0, e.message);
+  }
+}
+
+function updateArenaCard(idx, model, ok, ms, text) {
+  const card = document.getElementById(`arena-card-${idx}`);
+  const pre = document.getElementById(`arena-pre-${idx}`);
+  if (card) card.querySelector('.card-title').textContent = `${model} · ${ms}ms · ${ok ? 'OK' : 'ERR'}`;
+  if (pre) pre.textContent = text;
+  lastArenaResults[idx] = { model, ms, ok, text };
 }
 
 async function loadPipelines() {
