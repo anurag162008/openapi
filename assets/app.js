@@ -5,6 +5,7 @@ let chatHistory = [];
 let useStream = true;
 let autoRefresh = true;
 let autoRefreshTimer = null;
+let lastArenaResults = [];
 let lastLogId = 0;
 const CHAT_STORAGE_KEY = 'nim_proxy_chat_history_v1';
 
@@ -750,7 +751,8 @@ async function runArena() {
       return { model, ms: Date.now() - t0, ok: false, text: e.message };
     }
   }));
-  out.innerHTML = results.map(r => `<div class="card"><div class="card-title">${esc(r.model)} · ${r.ms}ms · ${r.ok ? 'OK' : 'ERR'}</div><pre>${esc(r.text)}</pre></div>`).join('');
+  lastArenaResults = results;
+  out.innerHTML = results.map(r => `<div class=\"card\"><div class=\"card-title\">${esc(r.model)} · ${r.ms}ms · ${r.ok ? 'OK' : 'ERR'}</div><pre>${esc(r.text)}</pre></div>`).join('');
 }
 
 function clearArena() {
@@ -1102,4 +1104,21 @@ async function deleteRouter(id) {
 
 function copyText(text, msg) {
   navigator.clipboard.writeText(text).then(() => toast(msg || 'Copied!', 'success')).catch(() => toast('Copy failed', 'error'));
+}
+
+
+function copyArenaResults() {
+  if (!lastArenaResults.length) return toast('No arena results', 'error');
+  const txt = lastArenaResults.map(r => `Model: ${r.model}\nLatency: ${r.ms}ms\nStatus: ${r.ok ? 'OK' : 'ERR'}\n\n${r.text}`).join('\n\n---\n\n');
+  navigator.clipboard.writeText(txt).then(() => toast('Arena results copied ✓', 'success'));
+}
+
+function exportArenaResults() {
+  if (!lastArenaResults.length) return toast('No arena results', 'error');
+  const blob = new Blob([JSON.stringify({ generatedAt: new Date().toISOString(), results: lastArenaResults }, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `arena-results-${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.json`;
+  a.click();
+  toast('Arena results exported ✓', 'success');
 }

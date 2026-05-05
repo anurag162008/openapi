@@ -16,6 +16,8 @@ const ENV_FILE = path.join(__dirname, '.env');
 const PIPELINES_FILE = path.join(__dirname, 'pipelines.json');
 const MAX_LOGS = 1000;
 const PIPELINE_MAX_CONCURRENCY = parseInt(process.env.PIPELINE_MAX_CONCURRENCY || '3');
+const PIPELINE_PLANNER_TIMEOUT_MS = parseInt(process.env.PIPELINE_PLANNER_TIMEOUT_MS || '90000');
+const PIPELINE_SUBTASK_TIMEOUT_MS = parseInt(process.env.PIPELINE_SUBTASK_TIMEOUT_MS || '90000');
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let keys = [];          // { id, value, label, active, addedAt, stats }
@@ -117,7 +119,7 @@ function recordKeyUsage(id, result, extra = {}) {
 
 // ─── Internal Model Caller ────────────────────────────────────────────────────
 // Non-streaming call to any NVIDIA model with key rotation + retry
-async function callModel(modelId, messages, maxTokens = 2048) {
+async function callModel(modelId, messages, maxTokens = 2048, timeoutMs = 90000) {
   const triedIds = [];
   let lastError = 'No active keys';
   for (let attempt = 0; attempt < Math.min(keys.length || 1, 3); attempt++) {
@@ -126,7 +128,7 @@ async function callModel(modelId, messages, maxTokens = 2048) {
     triedIds.push(key.id);
     try {
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 90000);
+      const timer = setTimeout(() => ctrl.abort(), timeoutMs);
       const res = await fetch(`${NVIDIA_BASE}/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key.value}` },
@@ -150,10 +152,10 @@ async function callModel(modelId, messages, maxTokens = 2048) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-async function callModelWithRetry(modelId, messages, maxTokens = 2048, retries = 2) {
+async function callModelWithRetry(modelId, messages, maxTokens = 2048, retries = 2, timeoutMs = 90000) {
   let lastErr = null;
   for (let i = 0; i <= retries; i++) {
-    try { return await callModel(modelId, messages, maxTokens); }
+    try { return await callModel(modelId, messages, maxTokens, timeoutMs); }
     catch (e) {
       lastErr = e;
       if (i < retries) await sleep(250 * (2 ** i));
@@ -228,7 +230,7 @@ async function runPipeline(pipeline, messages, clientRes) {
       const planText = await callModelWithRetry(pipeline.models.planner, [
         { role: 'system', content: `${PLANNER_SYSTEM}\n\nEnabled task types for this pipeline: ${Object.entries(enabledTasks).filter(([, on]) => !!on).map(([k]) => k).join(', ') || 'general'}${enabledCustomIds.length ? `, ${enabledCustomIds.join(', ')}` : ''}.\nOnly emit types from enabled task types.` },
         ...messages
-      ], 1024);
+      ], 1024, 2, PIPELINE_PLANNER_TIMEOUT_MS);
       const jsonMatch = planText.match(/\[[\s\S]*\]/);
       plan = JSON.parse(jsonMatch ? jsonMatch[0] : planText);
       if (!Array.isArray(plan) || plan.length === 0) throw new Error('empty plan');
@@ -254,7 +256,7 @@ async function runPipeline(pipeline, messages, clientRes) {
         const result = await callModelWithRetry(modelId, [
           ...messages.filter(m => m.role === 'system'),
           { role: 'user', content: subtask.prompt }
-        ], 2048);
+        ], 2048, 2, PIPELINE_SUBTASK_TIMEOUT_MS);
         sse('pipeline_status', { step: 'subtask_done', index: idx, type: subtask.type, label: subtask.label, chars: result.length });
         return { type: subtask.type, label: subtask.label, model: modelId, result, ok: true };
       } catch (e) {
@@ -958,7 +960,8 @@ async function proxyToNvidia(req, res, endpoint) {
           }
         } catch (_) {
           // Client disconnected mid-stream
-        } finally {
+        addLog({ method: 'META', endpoint: '/pipeline/run', event: 'pipeline_run_finished', model: `pipeline/${pipeline.slug}`, statusCode: 200, latencyMs: Date.now() - startTime });
+  } finally {
           res.off('close', onStreamClose);
           res.end();
         }

@@ -371,31 +371,31 @@ NVIDIA_API_KEY_3_LABEL=Alt Key</pre>
         <select id="pf-code" style="width:100%"></select>
       </div>
       <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px">
-        <div style="font-size:12px;font-weight:600;margin-bottom:5px">🧠 Reasoning</div>
+        <label style="font-size:12px;font-weight:600;margin-bottom:5px;display:flex;gap:8px;align-items:center"><input id="pf-enable-reasoning" type="checkbox" checked> 🧠 Reasoning</label>
         <select id="pf-reasoning" style="width:100%"></select>
       </div>
       <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px">
-        <div style="font-size:12px;font-weight:600;margin-bottom:5px">📐 Math</div>
+        <label style="font-size:12px;font-weight:600;margin-bottom:5px;display:flex;gap:8px;align-items:center"><input id="pf-enable-math" type="checkbox" checked> 📐 Math</label>
         <select id="pf-math" style="width:100%"></select>
       </div>
       <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px">
-        <div style="font-size:12px;font-weight:600;margin-bottom:5px">✍️ Creative</div>
+        <label style="font-size:12px;font-weight:600;margin-bottom:5px;display:flex;gap:8px;align-items:center"><input id="pf-enable-creative" type="checkbox" checked> ✍️ Creative</label>
         <select id="pf-creative" style="width:100%"></select>
       </div>
       <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px">
-        <div style="font-size:12px;font-weight:600;margin-bottom:5px">📄 Summarization</div>
+        <label style="font-size:12px;font-weight:600;margin-bottom:5px;display:flex;gap:8px;align-items:center"><input id="pf-enable-summarization" type="checkbox" checked> 📄 Summarization</label>
         <select id="pf-summarization" style="width:100%"></select>
       </div>
       <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px">
-        <div style="font-size:12px;font-weight:600;margin-bottom:5px">🌐 Translation</div>
+        <label style="font-size:12px;font-weight:600;margin-bottom:5px;display:flex;gap:8px;align-items:center"><input id="pf-enable-translation" type="checkbox" checked> 🌐 Translation</label>
         <select id="pf-translation" style="width:100%"></select>
       </div>
       <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px">
-        <div style="font-size:12px;font-weight:600;margin-bottom:5px">⚡ Factual</div>
+        <label style="font-size:12px;font-weight:600;margin-bottom:5px;display:flex;gap:8px;align-items:center"><input id="pf-enable-factual" type="checkbox" checked> ⚡ Factual</label>
         <select id="pf-factual" style="width:100%"></select>
       </div>
       <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px">
-        <div style="font-size:12px;font-weight:600;margin-bottom:5px">👁️ Multimodal</div>
+        <label style="font-size:12px;font-weight:600;margin-bottom:5px;display:flex;gap:8px;align-items:center"><input id="pf-enable-multimodal" type="checkbox" checked> 👁️ Multimodal</label>
         <select id="pf-multimodal" style="width:100%"></select>
       </div>
     </div>
@@ -432,6 +432,8 @@ NVIDIA_API_KEY_3_LABEL=Alt Key</pre>
     <textarea id="arena-input" class="chat-input" placeholder="Enter one prompt to test against selected models..."></textarea>
     <div style="display:flex;gap:8px;margin-top:8px">
       <button class="btn btn-primary" onclick="runArena()">Run Arena</button>
+      <button class="btn btn-ghost" onclick="copyArenaResults()">Copy</button>
+      <button class="btn btn-ghost" onclick="exportArenaResults()">Export</button>
       <button class="btn btn-ghost" onclick="clearArena()">Clear</button>
     </div>
   </div>
