@@ -250,7 +250,8 @@ function copyModelId() {
 function populateChatModelSelect(models) {
   const sel = document.getElementById('chat-model');
   sel.innerHTML = models.map(m => `<option value="${esc(m.id)}">${esc(m.name)} — ${esc(m.id)}</option>`).join('');
-  sel.value = 'meta/llama-3.3-70b-instruct';
+if (models.find(m => m.id === selectedModelId)) sel.value = selectedModelId;
+  else sel.value = models.find(m => m.id === 'meta/llama-3.3-70b-instruct') ? 'meta/llama-3.3-70b-instruct' : (models[0]?.id || '');
 }
 
 // ─── Chat ──────────────────────────────────────────────────────────────────
@@ -657,11 +658,13 @@ async function showPipelineForm(pipeline = null) {
     document.getElementById('pf-slug').value = pipeline.slug;
     document.getElementById('pf-max').value = pipeline.maxSubtasks || 4;
     document.getElementById('pf-slug').dataset.editId = pipeline.id;
+    document.getElementById('pf-custom-tasks').value = JSON.stringify(pipeline.customTasks || [], null, 2);
   } else {
     document.getElementById('pf-name').value = '';
     document.getElementById('pf-slug').value = '';
     document.getElementById('pf-max').value = '4';
     delete document.getElementById('pf-slug').dataset.editId;
+    document.getElementById('pf-custom-tasks').value = '[]';
   }
   document.getElementById('pf-name').focus();
   document.getElementById('pipeline-form').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -689,6 +692,8 @@ async function createPipeline() {
 
   const models = {};
   const enabledTasks = {};
+  let customTasks = [];
+  try { customTasks = JSON.parse(document.getElementById('pf-custom-tasks').value || '[]'); if (!Array.isArray(customTasks)) throw new Error('invalid'); } catch { return toast('Custom tasks must be valid JSON array', 'error'); }
   ['planner', 'synthesizer', ...Object.keys(TASK_CONFIG)].forEach(type => {
     const sel = document.getElementById('pf-' + type);
     if (sel) models[type] = sel.value;
@@ -698,10 +703,10 @@ async function createPipeline() {
 
   try {
     if (editId) {
-      await api('/api/pipelines/' + editId, 'PATCH', { name, maxSubtasks, models, enabledTasks });
+      await api('/api/pipelines/' + editId, 'PATCH', { name, maxSubtasks, models, enabledTasks, customTasks });
       toast('Pipeline updated ✓', 'success');
     } else {
-      await api('/api/pipelines', 'POST', { name, slug, maxSubtasks, models, enabledTasks });
+      await api('/api/pipelines', 'POST', { name, slug, maxSubtasks, models, enabledTasks, customTasks });
       toast('Pipeline created ✓', 'success');
     }
     hidePipelineForm();

@@ -400,6 +400,13 @@ NVIDIA_API_KEY_3_LABEL=Alt Key</pre>
       </div>
     </div>
 
+
+    <div style="margin-bottom:14px">
+      <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:6px">🧩 Custom Tasks (JSON)</div>
+      <textarea id="pf-custom-tasks" class="chat-input" rows="5" placeholder='[{"id":"security_review","label":"Security Review","model":"nvidia/llama-3.1-nemotron-ultra-253b-v1","instruction":"Focus on vulnerabilities"}]'></textarea>
+      <div style="font-size:11px;color:var(--text3);margin-top:6px">Each custom task can be enabled/disabled and selected by planner via its <code>id</code>.</div>
+    </div>
+
     <div style="display:flex;gap:8px">
       <button class="btn btn-primary" onclick="createPipeline()">✓ Create Pipeline</button>
       <button class="btn btn-ghost" onclick="hidePipelineForm()">Cancel</button>
