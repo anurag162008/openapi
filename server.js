@@ -562,15 +562,12 @@ const NVIDIA_FREE_MODELS = [
   { id: 'meta/llama-3.2-1b-instruct',              name: 'Llama 3.2 1B Instruct',       org: 'meta',        ctx: 131072,  category: 'llm',       free: true },
   { id: 'meta/llama-3.2-11b-vision-instruct',      name: 'Llama 3.2 11B Vision',        org: 'meta',        ctx: 131072,  category: 'multimodal',free: true },
   { id: 'meta/llama-3.2-90b-vision-instruct',      name: 'Llama 3.2 90B Vision',        org: 'meta',        ctx: 131072,  category: 'multimodal',free: true },
-  { id: 'meta/llama3-8b-instruct',                 name: 'Llama 3 8B Instruct',         org: 'meta',        ctx: 8192,    category: 'llm',       free: true },
-  { id: 'meta/llama3-70b-instruct',                name: 'Llama 3 70B Instruct',        org: 'meta',        ctx: 8192,    category: 'llm',       free: true },
   { id: 'meta/llama-guard-4-12b',                  name: 'Llama Guard 4 12B (Safety)',  org: 'meta',        ctx: 131072,  category: 'safety',    free: true },
 
   // ── DeepSeek AI (ALL 4 are Free Endpoint — verified from build.nvidia.com/deepseek-ai) ──
   { id: 'deepseek-ai/deepseek-v4-flash',           name: 'DeepSeek V4 Flash (284B MoE)', org: 'deepseek-ai',ctx: 1000000, category: 'code',      free: true },
   { id: 'deepseek-ai/deepseek-v4-pro',             name: 'DeepSeek V4 Pro (1M ctx)',    org: 'deepseek-ai', ctx: 1000000, category: 'code',      free: true },
   { id: 'deepseek-ai/deepseek-v3.2',               name: 'DeepSeek V3.2 (685B)',        org: 'deepseek-ai', ctx: 131072,  category: 'llm',       free: true },
-  { id: 'deepseek-ai/deepseek-v3.1-terminus',      name: 'DeepSeek V3.1 Terminus',      org: 'deepseek-ai', ctx: 131072,  category: 'llm',       free: true },
 
   // ── Qwen (Free Endpoint confirmed — from build.nvidia.com/qwen) ───────────
   { id: 'qwen/qwen3-coder-480b-a35b-instruct',     name: 'Qwen3 Coder 480B (Agentic)',  org: 'qwen',        ctx: 262144,  category: 'code',      free: true },
@@ -592,8 +589,6 @@ const NVIDIA_FREE_MODELS = [
   { id: 'nvidia/llama-3.1-nemotron-ultra-253b-v1', name: 'Nemotron Ultra 253B v1',     org: 'nvidia',      ctx: 131072,  category: 'reasoning', free: true },
   { id: 'nvidia/llama-3.3-nemotron-super-49b-v1',  name: 'Nemotron Super 49B v1',      org: 'nvidia',      ctx: 131072,  category: 'llm',       free: true },
   { id: 'nvidia/llama-3.1-nemotron-nano-8b-v1',    name: 'Nemotron Nano 8B v1',        org: 'nvidia',      ctx: 131072,  category: 'llm',       free: true },
-  { id: 'nvidia/nemotron-mini-4b-instruct',         name: 'Nemotron Mini 4B',           org: 'nvidia',      ctx: 4096,    category: 'llm',       free: true },
-  { id: 'nvidia/nemotron-4-340b-instruct',          name: 'Nemotron 4 340B',            org: 'nvidia',      ctx: 4096,    category: 'llm',       free: true },
 
   // ── Z.ai / GLM ────────────────────────────────────────────────────────────
   // NOTE: glm-4.7 returns 404, glm-5.1 times out — removed until NVIDIA fixes them
@@ -605,7 +600,6 @@ const NVIDIA_FREE_MODELS = [
   { id: 'moonshotai/kimi-k2.6',                    name: 'Kimi K2.6 (1T Multimodal)',   org: 'moonshotai',  ctx: 131072,  category: 'multimodal',free: true },
   { id: 'moonshotai/kimi-k2.5',                    name: 'Kimi K2.5 (1T, Long Context)',org: 'moonshotai',  ctx: 131072,  category: 'llm',       free: true },
   { id: 'moonshotai/kimi-k2-thinking',             name: 'Kimi K2 Thinking',            org: 'moonshotai',  ctx: 262144,  category: 'reasoning', free: true },
-  { id: 'moonshotai/kimi-k2-instruct-0905',        name: 'Kimi K2 Instruct 0905',       org: 'moonshotai',  ctx: 262144,  category: 'llm',       free: true },
   { id: 'moonshotai/kimi-k2-instruct',             name: 'Kimi K2 Instruct',            org: 'moonshotai',  ctx: 131072,  category: 'llm',       free: true },
 
   // ── OpenAI GPT-OSS (Free Endpoint confirmed from build.nvidia.com/openai) ─
@@ -834,6 +828,12 @@ app.post('/api/models/verify', async (req, res) => {
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 });
 
+const modelStatusCache = {};
+
+app.get('/api/models/status', (req, res) => {
+  res.json(modelStatusCache);
+});
+
 app.post('/api/models/verify-all', async (req, res) => {
   const key = req.body?.apiKey || getActiveKeys()[0]?.value;
   if (!key) return res.status(400).json({ error: 'apiKey required (or add active key in server)' });
@@ -849,7 +849,9 @@ app.post('/api/models/verify-all', async (req, res) => {
           : { model: m.id, stream: false, max_tokens: 8, messages: [{ role: 'user', content: 'say ok' }] })
       });
       const txt = await vr.text();
-      return { model: m.id, category: m.category, ok: vr.ok, status: vr.status, reason: vr.ok ? 'PASS' : txt.slice(0, 220) };
+      const out = { model: m.id, category: m.category, ok: vr.ok, status: vr.status, reason: vr.ok ? 'PASS' : txt.slice(0, 220) };
+      modelStatusCache[m.id] = { ok: out.ok, status: out.status, ts: new Date().toISOString() };
+      return out;
     } catch (e) {
       return { model: m.id, category: m.category, ok: false, status: 0, reason: e.message };
     }
@@ -896,10 +898,22 @@ async function proxyToNvidia(req, res, endpoint) {
     try {
       const ir = await fetch(`${NVIDIA_BASE}/images/generations`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key.value}` },
-        body: JSON.stringify({ model: requestedModel, prompt, size: req.body?.size || '1024x1024' })
+        body: JSON.stringify({ model: requestedModel, prompt, size: req.body?.size || req.body?.image_size || '1024x1024', quality: req.body?.quality || 'standard' })
       });
-      const data = await ir.json();
+      const imgText = await ir.text();
+      let data;
+      try { data = JSON.parse(imgText); }
+      catch { return res.status(500).json({ error: { message: `Image API returned non-JSON: ${imgText.slice(0,200)}` } }); }
       if (!ir.ok) return res.status(ir.status).json(data);
+      if (data.requestId && data.statusUrl) {
+        for (let i = 0; i < 30; i++) {
+          await new Promise(r => setTimeout(r, 2000));
+          const poll = await fetch(data.statusUrl, { headers: { Authorization: `Bearer ${key.value}` } });
+          const pd = await poll.json().catch(() => ({}));
+          if (pd.status === 'fulfilled' || pd.data) { data = pd; break; }
+          if (pd.status === 'failed') return res.status(500).json({ error: { message: 'Image generation failed' } });
+        }
+      }
       const b64 = data?.data?.[0]?.b64_json;
       const url = data?.data?.[0]?.url;
       const markdownImg = b64 ? `![generated](data:image/png;base64,${b64})` : (url ? `![generated](${url})` : '(no image output)');

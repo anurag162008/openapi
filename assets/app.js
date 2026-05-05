@@ -6,7 +6,7 @@ let useStream = true;
 let autoRefresh = true;
 let autoRefreshTimer = null;
 let lastArenaResults = [];
-let arenaUseStream = false;
+let arenaUseStream = true;
 let lastLogId = 0;
 const CHAT_STORAGE_KEY = 'nim_proxy_chat_history_v1';
 
@@ -181,6 +181,7 @@ async function loadModels() {
     renderModels(data);
     populateChatModelSelect(data);
     setupArenaModels();
+    loadModelStatus();
   } catch {}
 }
 
@@ -216,6 +217,28 @@ function renderModels(models) {
       </div>
     </div>
   `).join('');
+}
+
+
+async function loadModelStatus() {
+  try {
+    const status = await api('/api/models/status');
+    Object.entries(status || {}).forEach(([id, st]) => updateModelCardStatus(id, !!st.ok));
+  } catch {}
+}
+
+function updateModelCardStatus(modelId, isLive) {
+  const card = document.getElementById('mc-' + modelId.replace(/\//g, '-'));
+  if (!card) return;
+  let dot = card.querySelector('.verify-dot');
+  if (!dot) {
+    dot = document.createElement('span');
+    dot.className = 'verify-dot';
+    dot.style.cssText = 'width:7px;height:7px;border-radius:50%;display:inline-block;margin-left:4px;';
+    card.querySelector('.model-id')?.appendChild(dot);
+  }
+  dot.style.background = isLive ? 'var(--green)' : 'var(--red)';
+  dot.title = isLive ? 'Live ✓' : 'Dead ✗';
 }
 
 function catBadge(c){return c==='code'?'badge-purple':c==='reasoning'?'badge-amber':c==='multimodal'?'badge-blue':c==='safety'?'badge-red':'badge-gray'}
@@ -271,6 +294,18 @@ function clearChat() {
 document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('chat-input').addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+  });
+
+  document.getElementById('chat-model').addEventListener('change', function() {
+    const model = allModels.find(m => m.id === this.value);
+    const isImage = model?.category === 'image';
+    const ctrls = document.getElementById('image-controls');
+    if (ctrls) ctrls.style.display = isImage ? 'flex' : 'none';
+    const streamBtn = document.getElementById('stream-btn');
+    if (streamBtn) {
+      streamBtn.style.opacity = isImage ? '0.4' : '1';
+      streamBtn.title = isImage ? 'Stream is handled automatically for image models' : '';
+    }
   });
 });
 
@@ -329,6 +364,7 @@ async function sendChat() {
   const signal = currentAbortController.signal;
 
   try {
+    const modelMeta = allModels.find(m => m.id === model);
     const body = {
       model,
       messages: chatHistory,
@@ -336,6 +372,7 @@ async function sendChat() {
       temperature: parseFloat(document.getElementById('chat-temp').value) || 0.7,
       stream: useStream
     };
+    if (modelMeta?.category === 'image') body.size = document.getElementById('image-size')?.value || '1024x1024';
 
     if (useStream) {
       // Show pipeline progress overlay if using a pipeline model
@@ -428,7 +465,14 @@ async function sendChat() {
         body: JSON.stringify(body),
         signal
       });
-      const data = await res.json();
+      const rawText = await res.text();
+      let data;
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        const match = rawText.match(/\{[\s\S]+\}/);
+        data = match ? JSON.parse(match[0]) : { error: { message: rawText.slice(0, 200) } };
+      }
       thinkEl.remove();
       if (data.error) {
         appendMsg('system-msg', '❌ ' + (data.error.message || JSON.stringify(data.error)));
@@ -478,7 +522,17 @@ function renderMessageContent(el, text) {
     el.appendChild(img);
     return;
   }
-  el.textContent = text;
+  el.innerHTML = renderMarkdown(text || '');
+}
+
+
+function renderMarkdown(text) {
+  return esc(text)
+    .replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => `<pre class="code-block" data-lang="${lang}"><code>${code}</code></pre>`)
+    .replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>')
+    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/\n/g, '<br>');
 }
 
 function scrollChatBottom() {
@@ -641,17 +695,35 @@ async function verifyModelPrompt() {
   } catch (e) { toast(e.message, 'error'); }
 }
 
-async function verifyAllModels() {
-  try {
-    const res = await api('/api/models/verify-all', 'POST', {});
-    const failed = res.results.filter(r => !r.ok);
-    const passed = res.results.filter(r => r.ok).map(r => `✅ ${r.model}`).join('\n');
-    const failedText = failed.map(r => `❌ ${r.model} [${r.status}] ${String(r.reason || '').slice(0, 140)}`).join('\n');
-    const msg = `Total: ${res.total}\nPass: ${res.pass}\nFail: ${res.fail}\n\n${passed}\n\n${failedText || 'No failures'}`;
-    const w = window.open('', '_blank');
-    if (w) w.document.write(`<pre style="white-space:pre-wrap;font-family:monospace">${esc(msg)}</pre>`);
-    toast(`Verify complete: ${res.pass} pass / ${res.fail} fail`, res.fail ? 'error' : 'success');
-  } catch (e) { toast(e.message, 'error'); }
+const verifyStatus = new Map();
+function showVerifyPanel(){ const p=document.getElementById('verify-panel'); if (p) p.style.display='block'; }
+async function verifyAllBatched() {
+  const BATCH_SIZE = 4, DELAY_MS = 1500;
+  const panel = document.getElementById('verify-progress');
+  const bar = document.getElementById('verify-bar');
+  const statusEl = document.getElementById('verify-status');
+  const resultsEl = document.getElementById('verify-results');
+  panel.style.display = 'block'; resultsEl.innerHTML='';
+  const toCheck = allModels.filter(m => m.category !== 'image' && m.category !== 'pipeline');
+  let done = 0;
+  for (let i=0; i<toCheck.length; i+=BATCH_SIZE) {
+    const batch = toCheck.slice(i, i+BATCH_SIZE);
+    await Promise.all(batch.map(async (m) => {
+      try {
+        const res = await fetch('/api/models/verify', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ model:m.id, type:'chat' }), signal: AbortSignal.timeout(15000) });
+        const data = await res.json().catch(() => ({ ok:false, status:0 }));
+        verifyStatus.set(m.id, { ok: !!data.ok, status: data.status, ts: Date.now() });
+        updateModelCardStatus(m.id, !!data.ok);
+        const row=document.createElement('div'); row.style.cssText='padding:3px 0;border-bottom:1px solid var(--border)';
+        row.innerHTML=`<span style="color:${data.ok?'var(--green)':'var(--red)'}">${data.ok?'✅':'❌'}</span> <b>${esc(m.id)}</b> <span style="color:var(--text3)">[${data.status}]</span>`;
+        resultsEl.appendChild(row);
+      } catch { verifyStatus.set(m.id, { ok:false, status:0, ts:Date.now() }); }
+      done++; bar.style.width=(done/toCheck.length*100)+'%'; statusEl.textContent=`${done}/${toCheck.length} checked`;
+    }));
+    if (i + BATCH_SIZE < toCheck.length) await new Promise(r => setTimeout(r, DELAY_MS));
+  }
+  const pass=[...verifyStatus.values()].filter(v=>v.ok).length;
+  toast(`Verify done: ${pass} live / ${toCheck.length-pass} dead`, pass < toCheck.length ? 'error':'success');
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -661,8 +733,17 @@ async function api(path, method='GET', body=null) {
   const res = await fetch(path, opts);
   const text = await res.text();
   let data = {};
-  try { data = text ? JSON.parse(text) : {}; } catch { throw new Error(text.slice(0, 200) || 'Non-JSON response'); }
-  if (!res.ok) throw new Error(data.error || 'Request failed');
+  try {
+    const firstLine = text.split('\n').find(l => {
+      const t = l.trim();
+      return t.startsWith('{') || t.startsWith('[');
+    });
+    data = JSON.parse(firstLine || text || '{}');
+  } catch {
+    const preview = text.slice(0, 120).replace(/\n/g, ' ');
+    throw new Error(preview || 'Non-JSON response from server');
+  }
+  if (!res.ok) throw new Error(data?.error?.message || data?.error || data?.detail || 'Request failed');
   return data;
 }
 
