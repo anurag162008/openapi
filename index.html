@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>NVIDIA NIM Proxy</title>
 <link rel="stylesheet" href="/assets/styles.css">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 
 </head>
 <body>
@@ -95,6 +96,13 @@
       </div>
       <button class="btn btn-ghost btn-sm" onclick="clearChat()">Clear</button>
       <button class="btn btn-ghost btn-sm" onclick="toggleStream()" id="stream-btn">Stream: ON</button>
+      <div id="image-controls" style="display:none;" class="flex gap-8 items-center">
+        <span style="color:var(--text3);font-size:12px">Size:</span>
+        <select id="image-size">
+          <option value="1024x1024">1024×1024</option><option value="1344x768">1344×768 (landscape)</option><option value="768x1344">768×1344 (portrait)</option><option value="512x512">512×512 (fast)</option>
+        </select>
+        <span style="background:var(--purple-bg);color:var(--purple);padding:2px 8px;border-radius:6px;font-size:11px">🖼️ Image Model</span>
+      </div>
     </div>
     <div class="chat-msgs" id="chat-msgs">
       <div class="msg system-msg">Select a model and start chatting → powered by NVIDIA NIM via localhost proxy</div>
@@ -127,12 +135,21 @@
       <option value="reasoning">🧠 Reasoning</option>
       <option value="multimodal">👁️ Multimodal</option>
       <option value="safety">🛡️ Safety</option>
+      <option value="image">🖼️ Image</option>
     </select>
-    <button class="btn btn-ghost btn-sm" onclick="verifyModelPrompt()">Verify Model</button>
-    <button class="btn btn-ghost btn-sm" onclick="verifyAllModels()">Verify All</button>
+    <button class="btn btn-ghost btn-sm" onclick="showVerifyPanel()">🔍 Verify</button>
     <button class="btn btn-ghost btn-sm" onclick="addCustomModelPrompt()">+ Add Model</button>
     <button class="btn btn-danger btn-sm" onclick="removeCustomModelPrompt()">Remove Model</button>
   </div>
+  <div id="verify-panel" style="display:none; background:var(--bg2); border:1px solid var(--border2); border-radius:10px; padding:16px; margin-bottom:16px;">
+  <div style="display:flex; gap:8px; align-items:center; margin-bottom:12px;">
+    <b style="flex:1">Model Verification</b>
+    <button class="btn btn-primary btn-sm" onclick="verifyAllBatched()">Verify All (batched)</button>
+    <button class="btn btn-ghost btn-sm" onclick="document.getElementById('verify-panel').style.display='none'">✕</button>
+  </div>
+  <div id="verify-progress" style="display:none; margin-bottom:8px;"><div style="height:4px; background:var(--bg3); border-radius:2px; overflow:hidden;"><div id="verify-bar" style="height:100%; background:var(--green); width:0%; transition:width 0.3s;"></div></div><div id="verify-status" style="font-size:11px; color:var(--text3); margin-top:4px;"></div></div>
+  <div id="verify-results" style="max-height:300px; overflow-y:auto; font-size:12px;"></div>
+</div>
   <div class="text-sm" style="color:var(--text3);margin-bottom:12px" id="model-count"></div>
   <div class="models-grid" id="models-grid"></div>
 </div>
@@ -435,7 +452,7 @@ NVIDIA_API_KEY_3_LABEL=Alt Key</pre>
     </div>
     <textarea id="arena-input" class="chat-input" placeholder="Enter one prompt to test against selected models..."></textarea>
     <div style="display:flex;gap:8px;margin-top:8px">
-      <button class="btn btn-ghost" id="arena-stream-btn" onclick="toggleArenaStream()">Arena Stream: OFF</button>
+      <button class="btn btn-ghost" id="arena-stream-btn" onclick="toggleArenaStream()">Arena Stream: ON</button>
       <button class="btn btn-primary" onclick="runArena()">Run Arena</button>
       <button class="btn btn-ghost" onclick="copyArenaResults()">Copy</button>
       <button class="btn btn-ghost" onclick="exportArenaResults()">Export</button>
