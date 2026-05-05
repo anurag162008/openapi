@@ -42,6 +42,9 @@
     <span class="icon">🔗</span> Pipeline
     <span id="pipeline-badge" style="margin-left:auto;background:var(--cyan);color:#000;border-radius:10px;padding:1px 7px;font-size:11px;display:none">0</span>
   </button>
+  <button class="nav-item" onclick="showTab('arena')" id="nav-arena">
+    <span class="icon">🥊</span> Arena
+  </button>
   <button class="nav-item" onclick="showTab('keys')" id="nav-keys">
     <span class="icon">🔑</span> API Keys
     <span id="key-badge" style="margin-left:auto;font-size:11px;color:var(--text3)">0</span>
@@ -408,6 +411,24 @@ NVIDIA_API_KEY_3_LABEL=Alt Key</pre>
   <div id="pipeline-list">
     <div class="empty">No pipelines yet — click "New Pipeline" to create one</div>
   </div>
+</div>
+
+<!-- ─── ARENA ─── -->
+<div id="tab-arena" class="tab">
+  <div class="card">
+    <div class="card-title">Model Arena (parallel compare)</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px">
+      <select id="arena-model-1"></select>
+      <select id="arena-model-2"></select>
+      <select id="arena-model-3"></select>
+    </div>
+    <textarea id="arena-input" class="chat-input" placeholder="Enter one prompt to test against selected models..."></textarea>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <button class="btn btn-primary" onclick="runArena()">Run Arena</button>
+      <button class="btn btn-ghost" onclick="clearArena()">Clear</button>
+    </div>
+  </div>
+  <div id="arena-results"></div>
 </div>
 
 </main>

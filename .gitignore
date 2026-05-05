@@ -5,6 +5,12 @@ node_modules/
 .env
 .env.*
 
+# runtime state (local)
+pipelines.json
+routers.json
+chats.json
+*.local.json
+
 # logs
 logs/
 *.log

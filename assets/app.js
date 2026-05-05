@@ -6,11 +6,35 @@ let useStream = true;
 let autoRefresh = true;
 let autoRefreshTimer = null;
 let lastLogId = 0;
+const CHAT_STORAGE_KEY = 'nim_proxy_chat_history_v1';
 
 // ─── Init ──────────────────────────────────────────────────────────────────
 async function init() {
+  loadChatHistory();
   await Promise.all([refreshHealth(), refreshKeys(), loadModels(), refreshLogs(), loadPipelines()]);
+  setupArenaModels();
   startAutoRefresh();
+}
+
+function saveChatHistory() {
+  try { localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(chatHistory)); } catch {}
+}
+
+function loadChatHistory() {
+  try {
+    const raw = localStorage.getItem(CHAT_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return;
+    chatHistory = parsed.filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string');
+    const wrap = document.getElementById('chat-msgs');
+    wrap.innerHTML = '';
+    if (!chatHistory.length) {
+      wrap.innerHTML = '<div class="msg system-msg">Welcome! Select a model and start chatting.</div>';
+      return;
+    }
+    chatHistory.forEach(m => addMessage(m.role, m.content));
+  } catch {}
 }
 
 function startAutoRefresh() {
@@ -154,6 +178,7 @@ async function loadModels() {
     allModels = data;
     renderModels(data);
     populateChatModelSelect(data);
+    setupArenaModels();
   } catch {}
 }
 
@@ -237,6 +262,7 @@ function toggleStream() {
 function clearChat() {
   chatHistory = [];
   document.getElementById('chat-msgs').innerHTML = '<div class="msg system-msg">Chat cleared</div>';
+  saveChatHistory();
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -292,6 +318,7 @@ async function sendChat() {
 
   appendMsg('user', text);
   chatHistory.push({ role: 'user', content: text });
+  saveChatHistory();
 
   const thinkEl = appendMsg('assistant', '', true);
 
@@ -373,6 +400,7 @@ async function sendChat() {
       }
       hidePipelineProgress();
       chatHistory.push({ role: 'assistant', content: full });
+      saveChatHistory();
       if (!full.trim()) {
         appendMsg('system-msg', '⚠️ Model returned empty response. Try again or switch model.');
       }
@@ -392,6 +420,7 @@ async function sendChat() {
         const reply = data.choices?.[0]?.message?.content || '';
         appendMsg('assistant', reply || '(empty response)');
         if (reply.trim()) chatHistory.push({ role: 'assistant', content: reply });
+        saveChatHistory();
       }
     }
   } catch (e) {
@@ -677,9 +706,53 @@ async function createPipeline() {
     }
     hidePipelineForm();
     loadPipelines();
+    loadModels();
   } catch (e) {
     toast(e.message || 'Error saving pipeline', 'error');
   }
+}
+
+function setupArenaModels() {
+  const ids = ['arena-model-1', 'arena-model-2', 'arena-model-3'];
+  const sels = ids.map(id => document.getElementById(id)).filter(Boolean);
+  if (!sels.length || !allModels.length) return;
+  const opts = allModels.map(m => `<option value="${esc(m.id)}">${esc(m.name)} — ${esc(m.id)}</option>`).join('');
+  sels.forEach((sel, i) => {
+    const prev = sel.value;
+    sel.innerHTML = `<option value="">(off)</option>${opts}`;
+    sel.value = prev || allModels[i]?.id || '';
+  });
+}
+
+async function runArena() {
+  const prompt = document.getElementById('arena-input')?.value?.trim();
+  if (!prompt) return toast('Arena prompt required', 'error');
+  const models = ['arena-model-1', 'arena-model-2', 'arena-model-3'].map(id => document.getElementById(id)?.value).filter(Boolean);
+  if (!models.length) return toast('Select at least one model', 'error');
+  const out = document.getElementById('arena-results');
+  out.innerHTML = '<div class="card">Running arena...</div>';
+  const results = await Promise.all(models.map(async model => {
+    const t0 = Date.now();
+    try {
+      const res = await fetch('/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer proxy' },
+        body: JSON.stringify({ model, stream: false, messages: [{ role: 'user', content: prompt }] })
+      });
+      const data = await res.json();
+      return { model, ms: Date.now() - t0, ok: res.ok, text: data.choices?.[0]?.message?.content || data.error?.message || '(empty)' };
+    } catch (e) {
+      return { model, ms: Date.now() - t0, ok: false, text: e.message };
+    }
+  }));
+  out.innerHTML = results.map(r => `<div class="card"><div class="card-title">${esc(r.model)} · ${r.ms}ms · ${r.ok ? 'OK' : 'ERR'}</div><pre>${esc(r.text)}</pre></div>`).join('');
+}
+
+function clearArena() {
+  const input = document.getElementById('arena-input');
+  const out = document.getElementById('arena-results');
+  if (input) input.value = '';
+  if (out) out.innerHTML = '';
 }
 
 async function loadPipelines() {
