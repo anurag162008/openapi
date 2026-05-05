@@ -13,7 +13,6 @@ const path = require('path');
 const PORT = parseInt(process.env.PORT || '3000');
 const NVIDIA_BASE = 'https://integrate.api.nvidia.com/v1';
 const ENV_FILE = path.join(__dirname, '.env');
-const ROUTERS_FILE   = path.join(__dirname, 'routers.json');
 const PIPELINES_FILE = path.join(__dirname, 'pipelines.json');
 const MAX_LOGS = 1000;
 
@@ -23,7 +22,6 @@ let currentKeyIndex = 0;
 let logs = [];
 let logIdCounter = 0;
 let requestCounter = 0;
-let routers = [];       // { id, name, slug, models:{...}, createdAt, stats }
 let pipelines = [];     // { id, name, slug, models:{planner,synthesizer,...}, maxSubtasks, createdAt, stats }
 
 // ─── .env loader/saver ────────────────────────────────────────────────────────
@@ -160,7 +158,7 @@ function savePipelines() {
 }
 
 const PLANNER_SYSTEM = `You are a task decomposition expert for an AI pipeline system.
-Analyze the user's request and break it into 2-5 focused subtasks for specialist models.
+Analyze the user's request and break it into 1-5 focused subtasks for specialist models.
 
 Rules:
 - Each subtask must be SELF-CONTAINED (include all needed context)
@@ -168,7 +166,7 @@ Rules:
 - Only decompose if the task genuinely has multiple distinct aspects
 - For simple tasks, return a single subtask
 
-Valid types: general, code, reasoning, math, creative, summarization, translation, factual
+Valid types: general, code, reasoning, math, creative, summarization, translation, factual, multimodal
 
 Return ONLY valid JSON (no markdown fences, no explanation):
 [{"type":"code","label":"Fix the auth bug","prompt":"...full focused prompt with all context..."}]`;
@@ -200,9 +198,10 @@ async function runPipeline(pipeline, messages, clientRes) {
     console.log(`[pipeline:${pipeline.slug}] Planning with ${pipeline.models.planner}`);
 
     let plan = [];
+    const enabledTasks = (pipeline.enabledTasks && typeof pipeline.enabledTasks === 'object') ? pipeline.enabledTasks : Object.fromEntries(Object.keys(PIPELINE_DEFAULT_MODELS).filter(t => !['planner', 'synthesizer'].includes(t)).map(t => [t, true]));
     try {
       const planText = await callModel(pipeline.models.planner, [
-        { role: 'system', content: PLANNER_SYSTEM },
+        { role: 'system', content: `${PLANNER_SYSTEM}\n\nEnabled task types for this pipeline: ${Object.entries(enabledTasks).filter(([, on]) => !!on).map(([k]) => k).join(', ') || 'general'}.\nOnly emit types from enabled task types.` },
         ...messages
       ], 1024);
       const jsonMatch = planText.match(/\[[\s\S]*\]/);
@@ -214,7 +213,9 @@ async function runPipeline(pipeline, messages, clientRes) {
     }
 
     // Cap subtasks
-    plan = plan.slice(0, pipeline.maxSubtasks || 5);
+    const allowedTypesSet = new Set(Object.entries(enabledTasks).filter(([, on]) => !!on).map(([k]) => k));
+    plan = plan.map(p => ({ ...p, type: (p?.type || 'general').toString().toLowerCase() })).filter(p => allowedTypesSet.has(p.type)).slice(0, pipeline.maxSubtasks || 5);
+    if (!plan.length) plan = [{ type: 'general', label: 'Main task', prompt: originalRequest }];
     sse('pipeline_status', { step: 'plan_ready', subtasks: plan.map(p => ({ type: p.type, label: p.label })) });
     console.log(`[pipeline:${pipeline.slug}] Plan: ${plan.map(p => p.type).join(', ')}`);
 
@@ -316,23 +317,6 @@ async function runPipeline(pipeline, messages, clientRes) {
       clientRes.end();
     }
   }
-}
-
-// ─── Router Manager ───────────────────────────────────────────────────────────
-function loadRouters() {
-  try {
-    if (fs.existsSync(ROUTERS_FILE)) {
-      return JSON.parse(fs.readFileSync(ROUTERS_FILE, 'utf8'));
-    }
-  } catch (e) { console.error('[routers] Load failed:', e.message); }
-  return [];
-}
-
-function saveRouters() {
-  try {
-    fs.writeFileSync(ROUTERS_FILE, JSON.stringify(routers, null, 2), 'utf8');
-    return true;
-  } catch (e) { console.error('[routers] Save failed:', e.message); return false; }
 }
 
 function slugify(str) {
@@ -703,19 +687,6 @@ app.get('/v1/models', (req, res) => {
     free: m.free,
     name: m.name
   }));
-  const routerModels = routers.map(r => ({
-    id: `router/${r.slug}`,
-    object: 'model',
-    created: Math.floor(new Date(r.createdAt).getTime() / 1000),
-    owned_by: 'router',
-    permission: [],
-    root: `router/${r.slug}`,
-    parent: null,
-    context_window: 131072,
-    category: 'router',
-    free: true,
-    name: `[Router] ${r.name}`
-  }));
   const pipelineModels = pipelines.map(p => ({
     id: `pipeline/${p.slug}`,
     object: 'model',
@@ -729,7 +700,7 @@ app.get('/v1/models', (req, res) => {
     free: true,
     name: `[Pipeline] ${p.name}`
   }));
-  res.json({ object: 'list', data: [...data, ...routerModels, ...pipelineModels] });
+  res.json({ object: 'list', data: [...data, ...pipelineModels] });
 });
 
 app.get('/api/models', (req, res) => {
@@ -770,29 +741,8 @@ async function proxyToNvidia(req, res, endpoint) {
     return runPipeline(pipeline, req.body.messages || [], res);
   }
 
-  // ── Router model resolution ─────────────────────────────────────────────────
   if (req.body && typeof req.body.model === 'string' && req.body.model.startsWith('router/')) {
-    const slug = req.body.model.slice(7);
-    const router = routers.find(r => r.slug === slug);
-    if (!router) {
-      return res.status(404).json({
-        error: { message: `Router session '${slug}' not found. Create it in the Router tab.`, type: 'proxy_error', code: 'router_not_found' }
-      });
-    }
-    const taskType = classifyTask(req.body.messages);
-    const targetModel = router.models[taskType] || router.models.general;
-
-    // Update stats
-    router.stats.total = (router.stats.total || 0) + 1;
-    router.stats.byType = router.stats.byType || {};
-    router.stats.byType[taskType] = (router.stats.byType[taskType] || 0) + 1;
-    router.stats.lastUsed = new Date().toISOString();
-    saveRouters();
-
-    console.log(`[router] ${slug} classified→${taskType} routed→${targetModel}`);
-    req.body.model = targetModel;
-    req.body._routerSlug = slug;
-    req.body._routerType = taskType;
+    return res.status(410).json({ error: { message: `Router feature has been removed. Use pipeline/<slug> instead.`, type: 'proxy_error', code: 'router_removed' } });
   }
 
   const isStream  = !!(req.body && req.body.stream === true);
@@ -1110,54 +1060,6 @@ const ROUTER_DEFAULT_MODELS = {
   factual:       'meta/llama-3.1-8b-instruct',
 };
 
-app.get('/api/routers', (req, res) => res.json(routers));
-
-app.post('/api/routers', (req, res) => {
-  const { name, slug, models } = req.body;
-  if (!name || !slug) return res.status(400).json({ error: 'name and slug are required' });
-  if (!/^[a-z0-9-]+$/.test(slug))
-    return res.status(400).json({ error: 'slug must be lowercase letters, numbers, hyphens only' });
-  if (routers.find(r => r.slug === slug))
-    return res.status(409).json({ error: `Slug '${slug}' already exists` });
-
-  const routerModels = {};
-  for (const type of Object.keys(ROUTER_DEFAULT_MODELS)) {
-    routerModels[type] = models?.[type] || ROUTER_DEFAULT_MODELS[type];
-  }
-
-  const router = {
-    id: `rtr_${Date.now()}`,
-    name: name.trim(),
-    slug: slug.trim(),
-    models: routerModels,
-    createdAt: new Date().toISOString(),
-    stats: { total: 0, byType: {}, lastUsed: null }
-  };
-  routers.push(router);
-  saveRouters();
-  addLog({ method: 'META', endpoint: '/api/routers', event: 'router_created', label: router.name, statusCode: 201 });
-  res.status(201).json(router);
-});
-
-app.patch('/api/routers/:id', (req, res) => {
-  const router = routers.find(r => r.id === req.params.id);
-  if (!router) return res.status(404).json({ error: 'Router not found' });
-  if (req.body.name) router.name = req.body.name.trim();
-  if (req.body.models && typeof req.body.models === 'object')
-    Object.assign(router.models, req.body.models);
-  saveRouters();
-  res.json({ ok: true, router });
-});
-
-app.delete('/api/routers/:id', (req, res) => {
-  const idx = routers.findIndex(r => r.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Router not found' });
-  const removed = routers.splice(idx, 1)[0];
-  saveRouters();
-  addLog({ method: 'META', endpoint: '/api/routers', event: 'router_deleted', label: removed.name, statusCode: 200 });
-  res.json({ ok: true });
-});
-
 // ─── Pipeline Sessions API ────────────────────────────────────────────────────
 const PIPELINE_DEFAULT_MODELS = {
   planner:       'meta/llama-3.3-70b-instruct',
@@ -1191,6 +1093,7 @@ app.post('/api/pipelines', (req, res) => {
     name: name.trim(),
     slug: slug.trim(),
     models: pipelineModels,
+    enabledTasks: Object.fromEntries(Object.keys(PIPELINE_DEFAULT_MODELS).filter(t => !['planner', 'synthesizer'].includes(t)).map(t => [t, true])),
     maxSubtasks: Math.min(Math.max(parseInt(maxSubtasks) || 4, 2), 8),
     createdAt: new Date().toISOString(),
     stats: { total: 0, totalSubtasks: 0, avgSubtasks: 0, lastUsed: null }
@@ -1207,6 +1110,13 @@ app.patch('/api/pipelines/:id', (req, res) => {
   if (req.body.name) pipeline.name = req.body.name.trim();
   if (req.body.maxSubtasks) pipeline.maxSubtasks = Math.min(Math.max(parseInt(req.body.maxSubtasks) || 4, 2), 8);
   if (req.body.models && typeof req.body.models === 'object') Object.assign(pipeline.models, req.body.models);
+  if (req.body.enabledTasks && typeof req.body.enabledTasks === 'object') {
+    pipeline.enabledTasks = pipeline.enabledTasks || {};
+    for (const t of Object.keys(PIPELINE_DEFAULT_MODELS)) {
+      if (t === 'planner' || t === 'synthesizer') continue;
+      if (typeof req.body.enabledTasks[t] === 'boolean') pipeline.enabledTasks[t] = req.body.enabledTasks[t];
+    }
+  }
   savePipelines();
   res.json({ ok: true, pipeline });
 });
@@ -1242,7 +1152,6 @@ app.all('/v1/*splat', (req, res) => {
 
 // ─── Init & Start ─────────────────────────────────────────────────────────────
 keys = loadKeysFromEnv();
-routers   = loadRouters();
 pipelines = loadPipelines();
 
 // ─── Startup Connectivity Check ───────────────────────────────────────────────
