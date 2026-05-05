@@ -9,7 +9,7 @@ let lastLogId = 0;
 
 // ─── Init ──────────────────────────────────────────────────────────────────
 async function init() {
-  await Promise.all([refreshHealth(), refreshKeys(), loadModels(), refreshLogs(), loadRouters(), loadPipelines()]);
+  await Promise.all([refreshHealth(), refreshKeys(), loadModels(), refreshLogs(), loadPipelines()]);
   startAutoRefresh();
 }
 
@@ -29,7 +29,6 @@ function showTab(name) {
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   document.getElementById('tab-' + name).classList.add('active');
   document.getElementById('nav-' + name).classList.add('active');
-  if (name === 'router') loadRouters();
   if (name === 'pipeline') loadPipelines();
 }
 
@@ -660,17 +659,20 @@ async function createPipeline() {
   if (!/^[a-z0-9-]+$/.test(slug)) { toast('Slug: only lowercase letters, numbers, hyphens', 'error'); return; }
 
   const models = {};
+  const enabledTasks = {};
   ['planner', 'synthesizer', ...Object.keys(TASK_CONFIG)].forEach(type => {
     const sel = document.getElementById('pf-' + type);
     if (sel) models[type] = sel.value;
+    const chk = document.getElementById('pf-enable-' + type);
+    enabledTasks[type] = chk ? !!chk.checked : true;
   });
 
   try {
     if (editId) {
-      await api('/api/pipelines/' + editId, 'PATCH', { name, maxSubtasks, models });
+      await api('/api/pipelines/' + editId, 'PATCH', { name, maxSubtasks, models, enabledTasks });
       toast('Pipeline updated ✓', 'success');
     } else {
-      await api('/api/pipelines', 'POST', { name, slug, maxSubtasks, models });
+      await api('/api/pipelines', 'POST', { name, slug, maxSubtasks, models, enabledTasks });
       toast('Pipeline created ✓', 'success');
     }
     hidePipelineForm();

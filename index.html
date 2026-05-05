@@ -38,10 +38,6 @@
     <span id="log-badge" style="margin-left:auto;background:var(--blue-bg);color:var(--blue);border-radius:10px;padding:1px 7px;font-size:11px;display:none">0</span>
   </button>
   <div class="nav-sep"></div>
-  <button class="nav-item" onclick="showTab('router')" id="nav-router">
-    <span class="icon">🔀</span> Router
-    <span id="router-badge" style="margin-left:auto;background:var(--purple-bg);color:var(--purple);border-radius:10px;padding:1px 7px;font-size:11px;display:none">0</span>
-  </button>
   <button class="nav-item" onclick="showTab('pipeline')" id="nav-pipeline">
     <span class="icon">🔗</span> Pipeline
     <span id="pipeline-badge" style="margin-left:auto;background:var(--cyan);color:#000;border-radius:10px;padding:1px 7px;font-size:11px;display:none">0</span>
@@ -361,13 +357,14 @@ NVIDIA_API_KEY_3_LABEL=Alt Key</pre>
 
     <!-- Specialist models -->
     <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:10px">⚡ Specialist Models (per task type)</div>
+    <div style="font-size:12px;color:var(--text3);margin-bottom:10px">Tip: uncheck any task type you don't want in this pipeline.</div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px">
       <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px">
-        <div style="font-size:12px;font-weight:600;margin-bottom:5px">💬 General</div>
+        <label style="font-size:12px;font-weight:600;margin-bottom:5px;display:flex;gap:8px;align-items:center"><input id="pf-enable-general" type="checkbox" checked> 💬 General</label>
         <select id="pf-general" style="width:100%"></select>
       </div>
       <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px">
-        <div style="font-size:12px;font-weight:600;margin-bottom:5px">💻 Code</div>
+        <label style="font-size:12px;font-weight:600;margin-bottom:5px;display:flex;gap:8px;align-items:center"><input id="pf-enable-code" type="checkbox" checked> 💻 Code</label>
         <select id="pf-code" style="width:100%"></select>
       </div>
       <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px">
@@ -411,95 +408,6 @@ NVIDIA_API_KEY_3_LABEL=Alt Key</pre>
   <div id="pipeline-list">
     <div class="empty">No pipelines yet — click "New Pipeline" to create one</div>
   </div>
-</div>
-
-<!-- ─── ROUTER ─── -->
-<div id="tab-router" class="tab">
-
-  <!-- Create / header bar -->
-  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
-    <div>
-      <div style="font-size:18px;font-weight:700;color:var(--text)">🔀 Model Router</div>
-      <div style="font-size:12px;color:var(--text3);margin-top:3px">Create virtual model IDs that auto-route requests to the best model by task type</div>
-    </div>
-    <button class="btn btn-primary" onclick="showRouterForm()">+ New Session</button>
-  </div>
-
-  <!-- Create form (hidden by default) -->
-  <div id="router-form" style="display:none">
-  <div class="card" style="border-color:var(--blue);margin-bottom:20px">
-    <div class="card-title" style="color:var(--blue)">⚙️ New Router Session</div>
-
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px">
-      <div>
-        <label style="font-size:12px;color:var(--text3);display:block;margin-bottom:5px">Session Name</label>
-        <input id="rf-name" placeholder="e.g. Dev Router" style="width:100%" oninput="autoSlug()">
-      </div>
-      <div>
-        <label style="font-size:12px;color:var(--text3);display:block;margin-bottom:5px">Model ID Slug <span style="color:var(--text3);font-size:11px">(auto-generated)</span></label>
-        <div style="display:flex;align-items:center;gap:6px">
-          <span style="color:var(--text3);font-size:13px;white-space:nowrap">router/</span>
-          <input id="rf-slug" placeholder="my-router" style="width:100%;font-family:var(--font)">
-        </div>
-      </div>
-    </div>
-
-    <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:10px">Task → Model Mapping</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px">
-      <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:12px">
-        <div style="font-size:12px;font-weight:600;margin-bottom:6px">💬 General <span style="color:var(--text3);font-weight:400">(default fallback)</span></div>
-        <select id="rf-general" style="width:100%"></select>
-      </div>
-      <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:12px">
-        <div style="font-size:12px;font-weight:600;margin-bottom:6px">💻 Code <span style="color:var(--text3);font-weight:400">(debug, implement, refactor)</span></div>
-        <select id="rf-code" style="width:100%"></select>
-      </div>
-      <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:12px">
-        <div style="font-size:12px;font-weight:600;margin-bottom:6px">🧠 Reasoning <span style="color:var(--text3);font-weight:400">(analyze, compare, evaluate)</span></div>
-        <select id="rf-reasoning" style="width:100%"></select>
-      </div>
-      <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:12px">
-        <div style="font-size:12px;font-weight:600;margin-bottom:6px">👁️ Multimodal <span style="color:var(--text3);font-weight:400">(image in prompt)</span></div>
-        <select id="rf-multimodal" style="width:100%"></select>
-      </div>
-      <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:12px">
-        <div style="font-size:12px;font-weight:600;margin-bottom:6px">📐 Math <span style="color:var(--text3);font-weight:400">(equations, proofs, calculations)</span></div>
-        <select id="rf-math" style="width:100%"></select>
-      </div>
-      <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:12px">
-        <div style="font-size:12px;font-weight:600;margin-bottom:6px">✍️ Creative <span style="color:var(--text3);font-weight:400">(stories, poems, brainstorm)</span></div>
-        <select id="rf-creative" style="width:100%"></select>
-      </div>
-      <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:12px">
-        <div style="font-size:12px;font-weight:600;margin-bottom:6px">📄 Summarization <span style="color:var(--text3);font-weight:400">(long docs, articles)</span></div>
-        <select id="rf-summarization" style="width:100%"></select>
-      </div>
-      <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:12px">
-        <div style="font-size:12px;font-weight:600;margin-bottom:6px">🌐 Translation <span style="color:var(--text3);font-weight:400">(language conversion)</span></div>
-        <select id="rf-translation" style="width:100%"></select>
-      </div>
-      <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:12px">
-        <div style="font-size:12px;font-weight:600;margin-bottom:6px">⚡ Factual <span style="color:var(--text3);font-weight:400">(quick Q&A → fast small models)</span></div>
-        <select id="rf-factual" style="width:100%"></select>
-      </div>
-    </div>
-
-    <div style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:10px 14px;margin-bottom:14px;font-size:12px;color:var(--text3);line-height:1.6">
-      🤖 <b style="color:var(--text2)">How routing works:</b> When a request arrives for <code style="color:var(--cyan)">router/&lt;slug&gt;</code>, the proxy classifies it into one of <b style="color:var(--text)">9 task types</b> — by keyword scoring (last message weighted 3×), long-text detection (&gt;3000 words → Summarization), non-Latin script detection (Arabic/CJK/etc → Translation), or image presence (→ Multimodal). It then transparently swaps the model ID before forwarding to NVIDIA.
-    </div>
-
-    <div style="display:flex;gap:8px">
-      <button class="btn btn-primary" onclick="createRouter()">✓ Create Session</button>
-      <button class="btn btn-ghost" onclick="hideRouterForm()">Cancel</button>
-    </div>
-  </div>
-  </div>
-
-  <!-- Router list -->
-  <div id="router-list">
-    <div class="empty">No router sessions yet — click "New Session" to create one</div>
-  </div>
-
 </div>
 
 </main>
