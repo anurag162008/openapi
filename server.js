@@ -735,7 +735,14 @@ app.get('/v1/models', (req, res) => {
 });
 
 app.get('/api/models', (req, res) => {
-  let result = NVIDIA_FREE_MODELS;
+  let result = [...NVIDIA_FREE_MODELS, ...pipelines.map(p => ({
+    id: `pipeline/${p.slug}`,
+    name: `[Pipeline] ${p.name}`,
+    org: 'pipeline',
+    category: 'pipeline',
+    ctx: 131072,
+    free: true
+  }))];
   if (req.query.q) {
     const q = req.query.q.toLowerCase();
     result = result.filter(m =>
