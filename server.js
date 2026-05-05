@@ -214,7 +214,8 @@ Just present the best unified answer. If specialists overlap, keep the most accu
 If specialists contradict, prefer the more detailed/confident one.
 Format the answer clearly and practically for the user.`;
 
-async function runPipeline(pipeline, messages, clientRes) {
+async function runPipeline(pipeline, messages, clientRes, opts = {}) {
+  const emitStatusEvents = opts.emitStatusEvents !== false;
   const startTime = Date.now();
   const activeForPipeline = pipelineConcurrency.get(pipeline.id) || 0;
   if (activeForPipeline >= PIPELINE_MAX_CONCURRENCY) {
@@ -224,6 +225,7 @@ async function runPipeline(pipeline, messages, clientRes) {
   pipelineConcurrency.set(pipeline.id, activeForPipeline + 1);
 
   function sse(eventName, data) {
+    if (!emitStatusEvents) return;
     clientRes.write(`event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`);
   }
 
@@ -896,7 +898,11 @@ async function proxyToNvidia(req, res, endpoint) {
       });
     }
     console.log(`[pipeline] Routing request to pipeline '${slug}'`);
-    return runPipeline(pipeline, req.body.messages || [], res);
+    const wantsPipelineEvents =
+      req.headers['x-pipeline-events'] === '1' ||
+      req.headers['x-client'] === 'nim-proxy-ui' ||
+      req.query.pipeline_events === '1';
+    return runPipeline(pipeline, req.body.messages || [], res, { emitStatusEvents: wantsPipelineEvents });
   }
 
   if (req.body && typeof req.body.model === 'string' && req.body.model.startsWith('router/')) {

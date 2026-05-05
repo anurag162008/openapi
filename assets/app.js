@@ -379,7 +379,7 @@ async function sendChat() {
       if (model.startsWith('pipeline/')) showPipelineProgress();
       const res = await fetch('/v1/chat/completions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer proxy' },
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer proxy', 'X-Client': 'nim-proxy-ui', 'X-Pipeline-Events': '1' },
         body: JSON.stringify(body),
         signal
       });
@@ -460,7 +460,7 @@ async function sendChat() {
     } else {
       const res = await fetch('/v1/chat/completions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer proxy' },
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer proxy', 'X-Client': 'nim-proxy-ui', 'X-Pipeline-Events': '1' },
         body: JSON.stringify(body),
         signal
       });
