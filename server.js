@@ -12,6 +12,21 @@ const path = require('path');
 // ─── Config ───────────────────────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || '3000');
 const NVIDIA_BASE = 'https://integrate.api.nvidia.com/v1';
+const NVIDIA_IMAGE_ENDPOINTS = ['/images/generations', '/genai/images/generations'];
+
+async function postImageGeneration(keyValue, payload) {
+  let lastRes = null;
+  for (const ep of NVIDIA_IMAGE_ENDPOINTS) {
+    const r = await fetch(`${NVIDIA_BASE}${ep}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${keyValue}` },
+      body: JSON.stringify(payload)
+    });
+    lastRes = r;
+    if (r.ok || r.status !== 404) return { res: r, endpoint: ep };
+  }
+  return { res: lastRes, endpoint: NVIDIA_IMAGE_ENDPOINTS[NVIDIA_IMAGE_ENDPOINTS.length - 1] };
+}
 const ENV_FILE = path.join(__dirname, '.env');
 const PIPELINES_FILE = path.join(__dirname, 'pipelines.json');
 const LOGS_FILE = path.join(__dirname, 'logs.local.json');
@@ -623,8 +638,7 @@ const NVIDIA_IMAGE_MODELS = [
   { id: 'black-forest-labs/FLUX.2-klein-4b', name: 'FLUX.2-klein-4b', org: 'black-forest-labs', ctx: 0, category: 'image', free: true },
   { id: 'stabilityai/stable-diffusion-3.5-large', name: 'Stable Diffusion 3.5 Large', org: 'stabilityai', ctx: 0, category: 'image', free: true },
   { id: 'qwen/qwen-image', name: 'Qwen Image', org: 'qwen', ctx: 0, category: 'image', free: true },
-  { id: 'qwen/qwen-image-edit', name: 'Qwen Image Edit', org: 'qwen', ctx: 0, category: 'image', free: true },
-  { id: 'microsoft/TRELLIS', name: 'TRELLIS', org: 'microsoft', ctx: 0, category: 'image', free: true }
+  { id: 'qwen/qwen-image-edit', name: 'Qwen Image Edit', org: 'qwen', ctx: 0, category: 'image', free: true }
 ];
 
 function loadUserModels() {
@@ -819,7 +833,9 @@ app.post('/api/models/verify', async (req, res) => {
   try {
     let vr;
     if (type === 'image') {
-      vr = await fetch(`${NVIDIA_BASE}/images/generations`, { method:'POST', headers:{'Content-Type':'application/json','Authorization':`Bearer ${key}`}, body: JSON.stringify({ model, prompt:'test image', size:'1024x1024' }) });
+      if (model === 'microsoft/TRELLIS') return res.json({ ok:false, status:400, model, detail:'TRELLIS is not compatible with /images/generations on this proxy.' });
+      const ir = await postImageGeneration(key, { model, prompt:'test image', size:'1024x1024' });
+      vr = ir.res;
     } else {
       vr = await fetch(`${NVIDIA_BASE}/chat/completions`, { method:'POST', headers:{'Content-Type':'application/json','Authorization':`Bearer ${key}`}, body: JSON.stringify({ model, stream:false, max_tokens:8, messages:[{role:'user',content:'say ok'}] }) });
     }
@@ -896,14 +912,17 @@ async function proxyToNvidia(req, res, endpoint) {
     const key = getActiveKeys()[0];
     if (!key) return res.status(503).json({ error: { message: 'No active API keys for image generation', type: 'proxy_error', code: 'no_keys' } });
     try {
-      const ir = await fetch(`${NVIDIA_BASE}/images/generations`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key.value}` },
-        body: JSON.stringify({ model: requestedModel, prompt, size: req.body?.size || req.body?.image_size || '1024x1024', quality: req.body?.quality || 'standard' })
-      });
+      const irReq = await postImageGeneration(key.value, { model: requestedModel, prompt, size: req.body?.size || req.body?.image_size || '1024x1024', quality: req.body?.quality || 'standard' });
+      const ir = irReq.res;
       const imgText = await ir.text();
       let data;
       try { data = JSON.parse(imgText); }
-      catch { return res.status(500).json({ error: { message: `Image API returned non-JSON: ${imgText.slice(0,200)}` } }); }
+      catch {
+        if (ir.status === 404) {
+          return res.status(400).json({ error: { message: `Image endpoint rejected model '${requestedModel}' (HTTP 404). Your account or region may not have image API enabled yet. Tried NVIDIA image endpoints and all returned 404.`, code: 'image_model_unsupported' } });
+        }
+        return res.status(500).json({ error: { message: `Image API returned non-JSON: ${imgText.slice(0,200)}` } });
+      }
       if (!ir.ok) return res.status(ir.status).json(data);
       if (data.requestId && data.statusUrl) {
         for (let i = 0; i < 30; i++) {

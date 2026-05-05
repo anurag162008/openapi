@@ -412,43 +412,42 @@ async function sendChat() {
       msgEl.textContent = '';
       thinkEl.replaceWith(msgEl);
 
-      // Clear timer on first token
       let firstToken = false;
+      let sseBuf = '';
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        if (!firstToken) {
-          firstToken = true;
-          clearInterval(chatTimerInterval);
-          document.getElementById('chat-status').textContent = '● streaming...';
-        }
-        const chunk = decoder.decode(value);
-        const lines = chunk.split('\n');
-        let i = 0;
-        while (i < lines.length) {
-          const line = lines[i];
-          // Pipeline status event
-          if (line === 'event: pipeline_status') {
-            const dataLine = lines[++i] || '';
-            if (dataLine.startsWith('data: ')) {
-              try {
-                const ev = JSON.parse(dataLine.slice(6));
-                updatePipelineProgress(ev);
-              } catch {}
-            }
-          } else if (line.startsWith('data: ') && line !== 'data: [DONE]') {
-            try {
-              const d = JSON.parse(line.slice(6));
-              const delta = d.choices?.[0]?.delta?.content || '';
-              if (delta) {
-                full += delta;
-                msgEl.textContent = full;
-                scrollChatBottom();
-              }
-            } catch {}
+        sseBuf += decoder.decode(value, { stream: true });
+        const frames = sseBuf.split('\n\n');
+        sseBuf = frames.pop() || '';
+
+        for (const frame of frames) {
+          const lines = frame.split('\n').map(l => l.trimEnd());
+          const eventLine = lines.find(l => l.startsWith('event: '));
+          const dataLines = lines.filter(l => l.startsWith('data: ')).map(l => l.slice(6));
+          if (!dataLines.length) continue;
+          const dataRaw = dataLines.join('\n').trim();
+          if (dataRaw === '[DONE]') continue;
+
+          if (eventLine === 'event: pipeline_status') {
+            try { updatePipelineProgress(JSON.parse(dataRaw)); } catch {}
+            continue;
           }
-          i++;
+
+          let d;
+          try { d = JSON.parse(dataRaw); } catch { continue; }
+          const delta = d.choices?.[0]?.delta?.content || '';
+          if (delta) {
+            if (!firstToken) {
+              firstToken = true;
+              clearInterval(chatTimerInterval);
+              document.getElementById('chat-status').textContent = '● streaming...';
+            }
+            full += delta;
+            renderMessageContent(msgEl, full);
+            scrollChatBottom();
+          }
         }
       }
       hidePipelineProgress();
@@ -937,13 +936,19 @@ async function runArenaForModel(model, prompt, idx) {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let full = '';
+    let sseBuf = '';
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      const chunk = decoder.decode(value);
-      for (const line of chunk.split('\n')) {
-        if (!line.startsWith('data: ') || line === 'data: [DONE]') continue;
-        try { full += JSON.parse(line.slice(6)).choices?.[0]?.delta?.content || ''; } catch {}
+      sseBuf += decoder.decode(value, { stream: true });
+      const frames = sseBuf.split('\n\n');
+      sseBuf = frames.pop() || '';
+      for (const frame of frames) {
+        const dataLines = frame.split('\n').filter(l => l.startsWith('data: ')).map(l => l.slice(6));
+        if (!dataLines.length) continue;
+        const raw = dataLines.join('\n').trim();
+        if (raw === '[DONE]') continue;
+        try { full += JSON.parse(raw).choices?.[0]?.delta?.content || ''; } catch {}
       }
       if (pre) pre.textContent = full || '...';
     }
