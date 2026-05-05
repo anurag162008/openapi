@@ -5,6 +5,8 @@ let chatHistory = [];
 let useStream = true;
 let autoRefresh = true;
 let autoRefreshTimer = null;
+let lastArenaResults = [];
+let arenaUseStream = false;
 let lastLogId = 0;
 const CHAT_STORAGE_KEY = 'nim_proxy_chat_history_v1';
 
@@ -250,7 +252,8 @@ function copyModelId() {
 function populateChatModelSelect(models) {
   const sel = document.getElementById('chat-model');
   sel.innerHTML = models.map(m => `<option value="${esc(m.id)}">${esc(m.name)} — ${esc(m.id)}</option>`).join('');
-  sel.value = 'meta/llama-3.3-70b-instruct';
+if (models.find(m => m.id === selectedModelId)) sel.value = selectedModelId;
+  else sel.value = models.find(m => m.id === 'meta/llama-3.3-70b-instruct') ? 'meta/llama-3.3-70b-instruct' : (models[0]?.id || '');
 }
 
 // ─── Chat ──────────────────────────────────────────────────────────────────
@@ -444,11 +447,25 @@ function appendMsg(role, text, thinking = false) {
   if (thinking) {
     el.innerHTML = '<div class="thinking"><span></span><span></span><span></span></div>';
   } else {
-    el.textContent = text;
+    renderMessageContent(el, text);
   }
   wrap.appendChild(el);
   scrollChatBottom();
   return el;
+}
+
+function renderMessageContent(el, text) {
+  const imgMatch = /^!\[[^\]]*\]\((data:image\/[^)]+|https?:\/\/[^)]+)\)$/.exec((text || '').trim());
+  if (imgMatch) {
+    const img = document.createElement('img');
+    img.src = imgMatch[1];
+    img.alt = 'generated image';
+    img.style.maxWidth = '100%';
+    img.style.borderRadius = '8px';
+    el.appendChild(img);
+    return;
+  }
+  el.textContent = text;
 }
 
 function scrollChatBottom() {
@@ -578,6 +595,39 @@ function toggleAutoRefresh() {
   document.getElementById('auto-refresh-btn').textContent = 'Auto: ' + (autoRefresh ? 'ON' : 'OFF');
 }
 
+async function addCustomModelPrompt() {
+  const id = prompt('Model ID (e.g. org/model-name)');
+  if (!id) return;
+  const name = prompt('Display name');
+  if (!name) return;
+  const category = prompt('Category (llm/code/reasoning/multimodal/image)', 'llm') || 'llm';
+  try {
+    await api('/api/models/custom', 'POST', { id, name, category, org: id.split('/')[0] || 'custom', free: true });
+    toast('Custom model added ✓', 'success');
+    loadModels();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function removeCustomModelPrompt() {
+  const id = prompt('Model ID to remove');
+  if (!id) return;
+  try {
+    await api('/api/models/custom/' + encodeURIComponent(id), 'DELETE');
+    toast('Custom model removed ✓', 'success');
+    loadModels();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function verifyModelPrompt() {
+  const model = prompt('Model ID to verify', document.getElementById('chat-model')?.value || '');
+  if (!model) return;
+  const type = (prompt('Type? chat or image', 'chat') || 'chat').toLowerCase();
+  try {
+    const res = await api('/api/models/verify', 'POST', { model, type });
+    toast(`Verify ${model}: ${res.status} ${res.ok ? 'OK' : 'FAIL'}`, res.ok ? 'success' : 'error');
+  } catch (e) { toast(e.message, 'error'); }
+}
+
 // ─── Helpers ───────────────────────────────────────────────────────────────
 async function api(path, method='GET', body=null) {
   const opts = { method, headers: { 'Content-Type': 'application/json' } };
@@ -657,11 +707,13 @@ async function showPipelineForm(pipeline = null) {
     document.getElementById('pf-slug').value = pipeline.slug;
     document.getElementById('pf-max').value = pipeline.maxSubtasks || 4;
     document.getElementById('pf-slug').dataset.editId = pipeline.id;
+    document.getElementById('pf-custom-tasks').value = JSON.stringify(pipeline.customTasks || [], null, 2);
   } else {
     document.getElementById('pf-name').value = '';
     document.getElementById('pf-slug').value = '';
     document.getElementById('pf-max').value = '4';
     delete document.getElementById('pf-slug').dataset.editId;
+    document.getElementById('pf-custom-tasks').value = '[]';
   }
   document.getElementById('pf-name').focus();
   document.getElementById('pipeline-form').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -689,6 +741,8 @@ async function createPipeline() {
 
   const models = {};
   const enabledTasks = {};
+  let customTasks = [];
+  try { customTasks = JSON.parse(document.getElementById('pf-custom-tasks').value || '[]'); if (!Array.isArray(customTasks)) throw new Error('invalid'); } catch { return toast('Custom tasks must be valid JSON array', 'error'); }
   ['planner', 'synthesizer', ...Object.keys(TASK_CONFIG)].forEach(type => {
     const sel = document.getElementById('pf-' + type);
     if (sel) models[type] = sel.value;
@@ -698,10 +752,10 @@ async function createPipeline() {
 
   try {
     if (editId) {
-      await api('/api/pipelines/' + editId, 'PATCH', { name, maxSubtasks, models, enabledTasks });
+      await api('/api/pipelines/' + editId, 'PATCH', { name, maxSubtasks, models, enabledTasks, customTasks });
       toast('Pipeline updated ✓', 'success');
     } else {
-      await api('/api/pipelines', 'POST', { name, slug, maxSubtasks, models, enabledTasks });
+      await api('/api/pipelines', 'POST', { name, slug, maxSubtasks, models, enabledTasks, customTasks });
       toast('Pipeline created ✓', 'success');
     }
     hidePipelineForm();
@@ -730,22 +784,9 @@ async function runArena() {
   const models = ['arena-model-1', 'arena-model-2', 'arena-model-3'].map(id => document.getElementById(id)?.value).filter(Boolean);
   if (!models.length) return toast('Select at least one model', 'error');
   const out = document.getElementById('arena-results');
-  out.innerHTML = '<div class="card">Running arena...</div>';
-  const results = await Promise.all(models.map(async model => {
-    const t0 = Date.now();
-    try {
-      const res = await fetch('/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer proxy' },
-        body: JSON.stringify({ model, stream: false, messages: [{ role: 'user', content: prompt }] })
-      });
-      const data = await res.json();
-      return { model, ms: Date.now() - t0, ok: res.ok, text: data.choices?.[0]?.message?.content || data.error?.message || '(empty)' };
-    } catch (e) {
-      return { model, ms: Date.now() - t0, ok: false, text: e.message };
-    }
-  }));
-  out.innerHTML = results.map(r => `<div class="card"><div class="card-title">${esc(r.model)} · ${r.ms}ms · ${r.ok ? 'OK' : 'ERR'}</div><pre>${esc(r.text)}</pre></div>`).join('');
+  lastArenaResults = models.map(model => ({ model, ms: 0, ok: false, text: 'Running...' }));
+  out.innerHTML = models.map((model, i) => `<div class="card" id="arena-card-${i}"><div class="card-title">${esc(model)} · running...</div><pre id="arena-pre-${i}">Waiting for response...</pre></div>`).join('');
+  await Promise.all(models.map((model, i) => runArenaForModel(model, prompt, i)));
 }
 
 function clearArena() {
@@ -753,6 +794,62 @@ function clearArena() {
   const out = document.getElementById('arena-results');
   if (input) input.value = '';
   if (out) out.innerHTML = '';
+  lastArenaResults = [];
+}
+
+function toggleArenaStream() {
+  arenaUseStream = !arenaUseStream;
+  const btn = document.getElementById('arena-stream-btn');
+  if (btn) btn.textContent = 'Arena Stream: ' + (arenaUseStream ? 'ON' : 'OFF');
+}
+
+async function runArenaForModel(model, prompt, idx) {
+  const t0 = Date.now();
+  const card = document.getElementById(`arena-card-${idx}`);
+  const pre = document.getElementById(`arena-pre-${idx}`);
+  try {
+    const res = await fetch('/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer proxy' },
+      body: JSON.stringify({ model, stream: arenaUseStream, messages: [{ role: 'user', content: prompt }] })
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      const text = err.error?.message || JSON.stringify(err) || 'Request failed';
+      updateArenaCard(idx, model, false, Date.now() - t0, text);
+      return;
+    }
+    if (!arenaUseStream) {
+      const data = await res.json();
+      const text = data.choices?.[0]?.message?.content || '(empty)';
+      updateArenaCard(idx, model, true, Date.now() - t0, text);
+      return;
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let full = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value);
+      for (const line of chunk.split('\n')) {
+        if (!line.startsWith('data: ') || line === 'data: [DONE]') continue;
+        try { full += JSON.parse(line.slice(6)).choices?.[0]?.delta?.content || ''; } catch {}
+      }
+      if (pre) pre.textContent = full || '...';
+    }
+    updateArenaCard(idx, model, true, Date.now() - t0, full || '(empty)');
+  } catch (e) {
+    updateArenaCard(idx, model, false, Date.now() - t0, e.message);
+  }
+}
+
+function updateArenaCard(idx, model, ok, ms, text) {
+  const card = document.getElementById(`arena-card-${idx}`);
+  const pre = document.getElementById(`arena-pre-${idx}`);
+  if (card) card.querySelector('.card-title').textContent = `${model} · ${ms}ms · ${ok ? 'OK' : 'ERR'}`;
+  if (pre) pre.textContent = text;
+  lastArenaResults[idx] = { model, ms, ok, text };
 }
 
 async function loadPipelines() {
@@ -1097,4 +1194,21 @@ async function deleteRouter(id) {
 
 function copyText(text, msg) {
   navigator.clipboard.writeText(text).then(() => toast(msg || 'Copied!', 'success')).catch(() => toast('Copy failed', 'error'));
+}
+
+
+function copyArenaResults() {
+  if (!lastArenaResults.length) return toast('No arena results', 'error');
+  const txt = lastArenaResults.map(r => `Model: ${r.model}\nLatency: ${r.ms}ms\nStatus: ${r.ok ? 'OK' : 'ERR'}\n\n${r.text}`).join('\n\n---\n\n');
+  navigator.clipboard.writeText(txt).then(() => toast('Arena results copied ✓', 'success'));
+}
+
+function exportArenaResults() {
+  if (!lastArenaResults.length) return toast('No arena results', 'error');
+  const blob = new Blob([JSON.stringify({ generatedAt: new Date().toISOString(), results: lastArenaResults }, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `arena-results-${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.json`;
+  a.click();
+  toast('Arena results exported ✓', 'success');
 }

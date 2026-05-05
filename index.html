@@ -128,6 +128,9 @@
       <option value="multimodal">👁️ Multimodal</option>
       <option value="safety">🛡️ Safety</option>
     </select>
+    <button class="btn btn-ghost btn-sm" onclick="verifyModelPrompt()">Verify Model</button>
+    <button class="btn btn-ghost btn-sm" onclick="addCustomModelPrompt()">+ Add Model</button>
+    <button class="btn btn-danger btn-sm" onclick="removeCustomModelPrompt()">Remove Model</button>
   </div>
   <div class="text-sm" style="color:var(--text3);margin-bottom:12px" id="model-count"></div>
   <div class="models-grid" id="models-grid"></div>
@@ -371,33 +374,40 @@ NVIDIA_API_KEY_3_LABEL=Alt Key</pre>
         <select id="pf-code" style="width:100%"></select>
       </div>
       <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px">
-        <div style="font-size:12px;font-weight:600;margin-bottom:5px">🧠 Reasoning</div>
+        <label style="font-size:12px;font-weight:600;margin-bottom:5px;display:flex;gap:8px;align-items:center"><input id="pf-enable-reasoning" type="checkbox" checked> 🧠 Reasoning</label>
         <select id="pf-reasoning" style="width:100%"></select>
       </div>
       <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px">
-        <div style="font-size:12px;font-weight:600;margin-bottom:5px">📐 Math</div>
+        <label style="font-size:12px;font-weight:600;margin-bottom:5px;display:flex;gap:8px;align-items:center"><input id="pf-enable-math" type="checkbox" checked> 📐 Math</label>
         <select id="pf-math" style="width:100%"></select>
       </div>
       <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px">
-        <div style="font-size:12px;font-weight:600;margin-bottom:5px">✍️ Creative</div>
+        <label style="font-size:12px;font-weight:600;margin-bottom:5px;display:flex;gap:8px;align-items:center"><input id="pf-enable-creative" type="checkbox" checked> ✍️ Creative</label>
         <select id="pf-creative" style="width:100%"></select>
       </div>
       <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px">
-        <div style="font-size:12px;font-weight:600;margin-bottom:5px">📄 Summarization</div>
+        <label style="font-size:12px;font-weight:600;margin-bottom:5px;display:flex;gap:8px;align-items:center"><input id="pf-enable-summarization" type="checkbox" checked> 📄 Summarization</label>
         <select id="pf-summarization" style="width:100%"></select>
       </div>
       <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px">
-        <div style="font-size:12px;font-weight:600;margin-bottom:5px">🌐 Translation</div>
+        <label style="font-size:12px;font-weight:600;margin-bottom:5px;display:flex;gap:8px;align-items:center"><input id="pf-enable-translation" type="checkbox" checked> 🌐 Translation</label>
         <select id="pf-translation" style="width:100%"></select>
       </div>
       <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px">
-        <div style="font-size:12px;font-weight:600;margin-bottom:5px">⚡ Factual</div>
+        <label style="font-size:12px;font-weight:600;margin-bottom:5px;display:flex;gap:8px;align-items:center"><input id="pf-enable-factual" type="checkbox" checked> ⚡ Factual</label>
         <select id="pf-factual" style="width:100%"></select>
       </div>
       <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px">
-        <div style="font-size:12px;font-weight:600;margin-bottom:5px">👁️ Multimodal</div>
+        <label style="font-size:12px;font-weight:600;margin-bottom:5px;display:flex;gap:8px;align-items:center"><input id="pf-enable-multimodal" type="checkbox" checked> 👁️ Multimodal</label>
         <select id="pf-multimodal" style="width:100%"></select>
       </div>
+    </div>
+
+
+    <div style="margin-bottom:14px">
+      <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:6px">🧩 Custom Tasks (JSON)</div>
+      <textarea id="pf-custom-tasks" class="chat-input" rows="5" placeholder='[{"id":"security_review","label":"Security Review","model":"nvidia/llama-3.1-nemotron-ultra-253b-v1","instruction":"Focus on vulnerabilities"}]'></textarea>
+      <div style="font-size:11px;color:var(--text3);margin-top:6px">Each custom task can be enabled/disabled and selected by planner via its <code>id</code>.</div>
     </div>
 
     <div style="display:flex;gap:8px">
@@ -424,7 +434,10 @@ NVIDIA_API_KEY_3_LABEL=Alt Key</pre>
     </div>
     <textarea id="arena-input" class="chat-input" placeholder="Enter one prompt to test against selected models..."></textarea>
     <div style="display:flex;gap:8px;margin-top:8px">
+      <button class="btn btn-ghost" id="arena-stream-btn" onclick="toggleArenaStream()">Arena Stream: OFF</button>
       <button class="btn btn-primary" onclick="runArena()">Run Arena</button>
+      <button class="btn btn-ghost" onclick="copyArenaResults()">Copy</button>
+      <button class="btn btn-ghost" onclick="exportArenaResults()">Export</button>
       <button class="btn btn-ghost" onclick="clearArena()">Clear</button>
     </div>
   </div>
