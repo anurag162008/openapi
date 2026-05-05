@@ -128,6 +128,9 @@
       <option value="multimodal">👁️ Multimodal</option>
       <option value="safety">🛡️ Safety</option>
     </select>
+    <button class="btn btn-ghost btn-sm" onclick="verifyModelPrompt()">Verify Model</button>
+    <button class="btn btn-ghost btn-sm" onclick="addCustomModelPrompt()">+ Add Model</button>
+    <button class="btn btn-danger btn-sm" onclick="removeCustomModelPrompt()">Remove Model</button>
   </div>
   <div class="text-sm" style="color:var(--text3);margin-bottom:12px" id="model-count"></div>
   <div class="models-grid" id="models-grid"></div>

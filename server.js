@@ -15,6 +15,7 @@ const NVIDIA_BASE = 'https://integrate.api.nvidia.com/v1';
 const ENV_FILE = path.join(__dirname, '.env');
 const PIPELINES_FILE = path.join(__dirname, 'pipelines.json');
 const LOGS_FILE = path.join(__dirname, 'logs.local.json');
+const USER_MODELS_FILE = path.join(__dirname, 'user_models.local.json');
 const MAX_LOGS = 1000;
 const PIPELINE_MAX_CONCURRENCY = parseInt(process.env.PIPELINE_MAX_CONCURRENCY || '3');
 const PIPELINE_PLANNER_TIMEOUT_MS = parseInt(process.env.PIPELINE_PLANNER_TIMEOUT_MS || '90000');
@@ -27,6 +28,7 @@ let logs = [];
 let logIdCounter = 0;
 let requestCounter = 0;
 let pipelines = [];     // { id, name, slug, models:{planner,synthesizer,...}, maxSubtasks, createdAt, stats }
+let userModels = [];
 const pipelineConcurrency = new Map();
 
 // ─── .env loader/saver ────────────────────────────────────────────────────────
@@ -620,6 +622,28 @@ const NVIDIA_FREE_MODELS = [
   { id: 'sarvamai/sarvam-m',                        name: 'Sarvam M (Multilingual, Indic)', org: 'sarvamai', ctx: 32768,  category: 'llm',       free: true },
 ];
 
+
+const NVIDIA_IMAGE_MODELS = [
+  { id: 'black-forest-labs/FLUX.1-dev', name: 'FLUX.1-dev', org: 'black-forest-labs', ctx: 0, category: 'image', free: true },
+  { id: 'black-forest-labs/FLUX.1-schnell', name: 'FLUX.1-schnell', org: 'black-forest-labs', ctx: 0, category: 'image', free: true },
+  { id: 'black-forest-labs/FLUX.2-klein-4b', name: 'FLUX.2-klein-4b', org: 'black-forest-labs', ctx: 0, category: 'image', free: true },
+  { id: 'stabilityai/stable-diffusion-3.5-large', name: 'Stable Diffusion 3.5 Large', org: 'stabilityai', ctx: 0, category: 'image', free: true },
+  { id: 'qwen/qwen-image', name: 'Qwen Image', org: 'qwen', ctx: 0, category: 'image', free: true },
+  { id: 'qwen/qwen-image-edit', name: 'Qwen Image Edit', org: 'qwen', ctx: 0, category: 'image', free: true },
+  { id: 'microsoft/TRELLIS', name: 'TRELLIS', org: 'microsoft', ctx: 0, category: 'image', free: true }
+];
+
+function loadUserModels() {
+  try { if (fs.existsSync(USER_MODELS_FILE)) { const d=JSON.parse(fs.readFileSync(USER_MODELS_FILE,'utf8')); if (Array.isArray(d)) return d; } } catch(e){ console.error('[models] load failed', e.message); }
+  return [];
+}
+function saveUserModels() {
+  try { fs.writeFileSync(USER_MODELS_FILE, JSON.stringify(userModels, null, 2), 'utf8'); return true; } catch(e){ console.error('[models] save failed', e.message); return false; }
+}
+function allCatalogModels() {
+  return [...NVIDIA_FREE_MODELS, ...NVIDIA_IMAGE_MODELS, ...userModels, ...pipelines.map(p => ({ id:`pipeline/${p.slug}`, name:`[Pipeline] ${p.name}`, org:'pipeline', category:'pipeline', ctx:131072, free:true }))];
+}
+
 // ─── Express Setup ────────────────────────────────────────────────────────────
 const app = express();
 app.use(express.json({ limit: '20mb' }));
@@ -728,7 +752,7 @@ app.delete('/api/logs', (req, res) => {
 
 // ─── Models ───────────────────────────────────────────────────────────────────
 app.get('/v1/models', (req, res) => {
-  const data = NVIDIA_FREE_MODELS.map(m => ({
+  const data = [...NVIDIA_FREE_MODELS, ...NVIDIA_IMAGE_MODELS, ...userModels].map(m => ({
     id: m.id,
     object: 'model',
     created: 1700000000,
@@ -758,14 +782,8 @@ app.get('/v1/models', (req, res) => {
 });
 
 app.get('/api/models', (req, res) => {
-  let result = [...NVIDIA_FREE_MODELS, ...pipelines.map(p => ({
-    id: `pipeline/${p.slug}`,
-    name: `[Pipeline] ${p.name}`,
-    org: 'pipeline',
-    category: 'pipeline',
-    ctx: 131072,
-    free: true
-  }))];
+  let result = allCatalogModels();
+
   if (req.query.q) {
     const q = req.query.q.toLowerCase();
     result = result.filter(m =>
@@ -777,6 +795,43 @@ app.get('/api/models', (req, res) => {
   }
   if (req.query.category) result = result.filter(m => m.category === req.query.category);
   res.json(result);
+});
+
+
+app.post('/api/models/custom', (req, res) => {
+  const { id, name, org='custom', category='llm', free=true } = req.body || {};
+  if (!id || !name) return res.status(400).json({ error: 'id and name required' });
+  if (allCatalogModels().find(m => m.id === id)) return res.status(409).json({ error: 'Model already exists' });
+  const model = { id: String(id).trim(), name: String(name).trim(), org: String(org).trim(), category: String(category).trim(), ctx: 131072, free: !!free };
+  userModels.push(model); saveUserModels();
+  addLog({ method:'META', endpoint:'/api/models/custom', event:'model_added', model:id, statusCode:201 });
+  res.status(201).json({ ok:true, model });
+});
+
+app.delete('/api/models/custom/:id', (req, res) => {
+  const id = decodeURIComponent(req.params.id);
+  const idx = userModels.findIndex(m => m.id === id);
+  if (idx === -1) return res.status(404).json({ error: 'Custom model not found' });
+  const removed = userModels.splice(idx,1)[0]; saveUserModels();
+  addLog({ method:'META', endpoint:'/api/models/custom', event:'model_removed', model:id, statusCode:200 });
+  res.json({ ok:true, removed });
+});
+
+app.post('/api/models/verify', async (req, res) => {
+  const { model, apiKey, type='chat' } = req.body || {};
+  if (!model) return res.status(400).json({ error: 'model required' });
+  const key = apiKey || getActiveKeys()[0]?.value;
+  if (!key) return res.status(400).json({ error: 'apiKey required (or add active key in server)' });
+  try {
+    let vr;
+    if (type === 'image') {
+      vr = await fetch(`${NVIDIA_BASE}/images/generations`, { method:'POST', headers:{'Content-Type':'application/json','Authorization':`Bearer ${key}`}, body: JSON.stringify({ model, prompt:'test image', size:'1024x1024' }) });
+    } else {
+      vr = await fetch(`${NVIDIA_BASE}/chat/completions`, { method:'POST', headers:{'Content-Type':'application/json','Authorization':`Bearer ${key}`}, body: JSON.stringify({ model, stream:false, max_tokens:8, messages:[{role:'user',content:'say ok'}] }) });
+    }
+    const txt = await vr.text();
+    res.json({ ok: vr.ok, status: vr.status, model, detail: txt.slice(0, 500) });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 });
 
 // ─── Main Proxy ───────────────────────────────────────────────────────────────
@@ -804,6 +859,28 @@ async function proxyToNvidia(req, res, endpoint) {
 
   if (req.body && typeof req.body.model === 'string' && req.body.model.startsWith('router/')) {
     return res.status(410).json({ error: { message: `Router feature has been removed. Use pipeline/<slug> instead.`, type: 'proxy_error', code: 'router_removed' } });
+  }
+
+
+  const requestedModel = req.body?.model;
+  const catalog = allCatalogModels();
+  const selectedModelMeta = catalog.find(m => m.id === requestedModel);
+  if (endpoint === '/chat/completions' && selectedModelMeta?.category === 'image') {
+    const prompt = (req.body?.messages || []).filter(m => m.role === 'user').slice(-1)[0]?.content || 'Generate an image';
+    const key = getActiveKeys()[0];
+    if (!key) return res.status(503).json({ error: { message: 'No active API keys for image generation', type: 'proxy_error', code: 'no_keys' } });
+    try {
+      const ir = await fetch(`${NVIDIA_BASE}/images/generations`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key.value}` },
+        body: JSON.stringify({ model: requestedModel, prompt, size: req.body?.size || '1024x1024' })
+      });
+      const data = await ir.json();
+      if (!ir.ok) return res.status(ir.status).json(data);
+      const b64 = data?.data?.[0]?.b64_json;
+      const url = data?.data?.[0]?.url;
+      const markdownImg = b64 ? `![generated](data:image/png;base64,${b64})` : (url ? `![generated](${url})` : '(no image output)');
+      return res.json({ id: `img-${Date.now()}`, object:'chat.completion', choices:[{ index:0, message:{ role:'assistant', content: markdownImg }, finish_reason:'stop' }] });
+    } catch (e) { return res.status(500).json({ error: { message: e.message, type: 'proxy_error', code: 'image_proxy_error' } }); }
   }
 
   const isStream  = !!(req.body && req.body.stream === true);
@@ -1230,6 +1307,7 @@ keys = loadKeysFromEnv();
 pipelines = loadPipelines();
 logs = loadLogs();
 logIdCounter = logs.reduce((m, l) => Math.max(m, l.id || 0), 0);
+userModels = loadUserModels();
 requestCounter = logs.reduce((m, l) => Math.max(m, l.requestNumber || 0), 0);
 
 // ─── Startup Connectivity Check ───────────────────────────────────────────────

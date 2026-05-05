@@ -447,11 +447,25 @@ function appendMsg(role, text, thinking = false) {
   if (thinking) {
     el.innerHTML = '<div class="thinking"><span></span><span></span><span></span></div>';
   } else {
-    el.textContent = text;
+    renderMessageContent(el, text);
   }
   wrap.appendChild(el);
   scrollChatBottom();
   return el;
+}
+
+function renderMessageContent(el, text) {
+  const imgMatch = /^!\[[^\]]*\]\((data:image\/[^)]+|https?:\/\/[^)]+)\)$/.exec((text || '').trim());
+  if (imgMatch) {
+    const img = document.createElement('img');
+    img.src = imgMatch[1];
+    img.alt = 'generated image';
+    img.style.maxWidth = '100%';
+    img.style.borderRadius = '8px';
+    el.appendChild(img);
+    return;
+  }
+  el.textContent = text;
 }
 
 function scrollChatBottom() {
@@ -579,6 +593,39 @@ function exportLogs() {
 function toggleAutoRefresh() {
   autoRefresh = !autoRefresh;
   document.getElementById('auto-refresh-btn').textContent = 'Auto: ' + (autoRefresh ? 'ON' : 'OFF');
+}
+
+async function addCustomModelPrompt() {
+  const id = prompt('Model ID (e.g. org/model-name)');
+  if (!id) return;
+  const name = prompt('Display name');
+  if (!name) return;
+  const category = prompt('Category (llm/code/reasoning/multimodal/image)', 'llm') || 'llm';
+  try {
+    await api('/api/models/custom', 'POST', { id, name, category, org: id.split('/')[0] || 'custom', free: true });
+    toast('Custom model added ✓', 'success');
+    loadModels();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function removeCustomModelPrompt() {
+  const id = prompt('Model ID to remove');
+  if (!id) return;
+  try {
+    await api('/api/models/custom/' + encodeURIComponent(id), 'DELETE');
+    toast('Custom model removed ✓', 'success');
+    loadModels();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function verifyModelPrompt() {
+  const model = prompt('Model ID to verify', document.getElementById('chat-model')?.value || '');
+  if (!model) return;
+  const type = (prompt('Type? chat or image', 'chat') || 'chat').toLowerCase();
+  try {
+    const res = await api('/api/models/verify', 'POST', { model, type });
+    toast(`Verify ${model}: ${res.status} ${res.ok ? 'OK' : 'FAIL'}`, res.ok ? 'success' : 'error');
+  } catch (e) { toast(e.message, 'error'); }
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
