@@ -12,10 +12,38 @@ const path = require('path');
 // ─── Config ───────────────────────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || '3000');
 const NVIDIA_BASE = 'https://integrate.api.nvidia.com/v1';
+const NVIDIA_IMAGE_ENDPOINTS = ['/images/generations', '/genai/images/generations'];
+let supportedModelsCache = { ts: 0, ids: null };
+
+async function postImageGeneration(keyValue, payload) {
+  let lastRes = null;
+  for (const ep of NVIDIA_IMAGE_ENDPOINTS) {
+    const r = await fetch(`${NVIDIA_BASE}${ep}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${keyValue}` },
+      body: JSON.stringify(payload)
+    });
+    lastRes = r;
+    if (r.ok || r.status !== 404) return { res: r, endpoint: ep };
+  }
+  return { res: lastRes, endpoint: NVIDIA_IMAGE_ENDPOINTS[NVIDIA_IMAGE_ENDPOINTS.length - 1] };
+}
+
+async function getSupportedModelIds(keyValue) {
+  const now = Date.now();
+  if (supportedModelsCache.ids && (now - supportedModelsCache.ts) < 5 * 60 * 1000) return supportedModelsCache.ids;
+  const res = await fetch(`${NVIDIA_BASE}/models`, { headers: { Authorization: `Bearer ${keyValue}` } });
+  if (!res.ok) return null;
+  const data = await res.json().catch(() => ({}));
+  const ids = Array.isArray(data?.data) ? data.data.map(m => m.id).filter(Boolean) : null;
+  if (ids) supportedModelsCache = { ts: now, ids: new Set(ids) };
+  return supportedModelsCache.ids;
+}
 const ENV_FILE = path.join(__dirname, '.env');
 const PIPELINES_FILE = path.join(__dirname, 'pipelines.json');
 const LOGS_FILE = path.join(__dirname, 'logs.local.json');
 const USER_MODELS_FILE = path.join(__dirname, 'user_models.local.json');
+const STATE_FILE = path.join(__dirname, 'state.local.json');
 const MAX_LOGS = 1000;
 const PIPELINE_MAX_CONCURRENCY = parseInt(process.env.PIPELINE_MAX_CONCURRENCY || '3');
 const PIPELINE_PLANNER_TIMEOUT_MS = parseInt(process.env.PIPELINE_PLANNER_TIMEOUT_MS || '90000');
@@ -199,7 +227,9 @@ Just present the best unified answer. If specialists overlap, keep the most accu
 If specialists contradict, prefer the more detailed/confident one.
 Format the answer clearly and practically for the user.`;
 
-async function runPipeline(pipeline, messages, clientRes) {
+async function runPipeline(pipeline, messages, clientRes, opts = {}) {
+  const emitStatusEvents = opts.emitStatusEvents !== false;
+  const asJson = opts.asJson === true;
   const startTime = Date.now();
   const activeForPipeline = pipelineConcurrency.get(pipeline.id) || 0;
   if (activeForPipeline >= PIPELINE_MAX_CONCURRENCY) {
@@ -209,18 +239,34 @@ async function runPipeline(pipeline, messages, clientRes) {
   pipelineConcurrency.set(pipeline.id, activeForPipeline + 1);
 
   function sse(eventName, data) {
+    if (!emitStatusEvents) return;
     clientRes.write(`event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`);
   }
 
   // Set SSE headers
-  clientRes.setHeader('Content-Type', 'text/event-stream');
-  clientRes.setHeader('Cache-Control', 'no-cache');
-  clientRes.setHeader('X-Accel-Buffering', 'no');
-  clientRes.flushHeaders?.();
+  if (!asJson) {
+    clientRes.setHeader('Content-Type', 'text/event-stream');
+    clientRes.setHeader('Cache-Control', 'no-cache');
+    clientRes.setHeader('X-Accel-Buffering', 'no');
+    clientRes.flushHeaders?.();
+  }
 
   const originalRequest = messages.filter(m => m.role === 'user').slice(-1)[0]?.content || '';
+  const shortMsg = (originalRequest || '').trim().toLowerCase();
+  const isGreeting = /^(hi|hello|hey|yo|sup|good\s*(morning|afternoon|evening)|namaste|salam|hola)/.test(shortMsg) && shortMsg.length < 60;
 
   try {
+    if (isGreeting) {
+      const greetModel = pipeline.models.general || pipeline.models.planner || 'meta/llama-3.3-70b-instruct';
+      const greetText = await callModelWithRetry(greetModel, messages, 256, 1, 30000);
+      if (asJson) {
+        return clientRes.json({ id:`chatcmpl-${Date.now()}`, object:'chat.completion', choices:[{ index:0, message:{ role:'assistant', content:greetText }, finish_reason:'stop' }] });
+      }
+      const chunk = JSON.stringify({ choices: [{ delta: { content: greetText } }] });
+      clientRes.write(`data: ${chunk}\n\n`);
+      clientRes.write('data: [DONE]\n\n');
+      return clientRes.end();
+    }
     // ── Step 1: Plan ───────────────────────────────────────────────────────
     sse('pipeline_status', { step: 'planning', model: pipeline.models.planner, message: 'Breaking task into subtasks...' });
     console.log(`[pipeline:${pipeline.slug}] Planning with ${pipeline.models.planner}`);
@@ -281,6 +327,11 @@ async function runPipeline(pipeline, messages, clientRes) {
       ...messages,
       { role: 'user', content: `Specialist results to synthesize:\n\n${specialistSummary}\n\nProvide the final unified answer:` }
     ];
+
+    if (asJson) {
+      const synthText = await callModelWithRetry(pipeline.models.synthesizer, synthMessages, 4096, 2, 180000);
+      return clientRes.json({ id:`chatcmpl-${Date.now()}`, object:'chat.completion', choices:[{ index:0, message:{ role:'assistant', content:synthText }, finish_reason:'stop' }] });
+    }
 
     // Stream synthesis using key rotation
     const triedIds = [];
@@ -544,6 +595,26 @@ function saveLogs() {
   catch (e) { console.error('[logs] Save failed:', e.message); return false; }
 }
 
+function loadRuntimeState() {
+  try {
+    if (!fs.existsSync(STATE_FILE)) return null;
+    const raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    return raw && typeof raw === 'object' ? raw : null;
+  } catch (e) { console.error('[state] Load failed:', e.message); return null; }
+}
+
+function saveRuntimeState() {
+  try {
+    const state = {
+      requestCounter,
+      modelStatusCache,
+      keys: keys.map(k => ({ id: k.id, active: !!k.active, stats: k.stats || {} }))
+    };
+    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
+    return true;
+  } catch (e) { console.error('[state] Save failed:', e.message); return false; }
+}
+
 // ─── NVIDIA Free Tier Models ──────────────────────────────────────────────────
 // Source: build.nvidia.com — only "Free Endpoint" tagged models (verified May 2025)
 // Model IDs match exactly what build.nvidia.com page URLs show: /<org>/<model-slug>
@@ -562,15 +633,12 @@ const NVIDIA_FREE_MODELS = [
   { id: 'meta/llama-3.2-1b-instruct',              name: 'Llama 3.2 1B Instruct',       org: 'meta',        ctx: 131072,  category: 'llm',       free: true },
   { id: 'meta/llama-3.2-11b-vision-instruct',      name: 'Llama 3.2 11B Vision',        org: 'meta',        ctx: 131072,  category: 'multimodal',free: true },
   { id: 'meta/llama-3.2-90b-vision-instruct',      name: 'Llama 3.2 90B Vision',        org: 'meta',        ctx: 131072,  category: 'multimodal',free: true },
-  { id: 'meta/llama3-8b-instruct',                 name: 'Llama 3 8B Instruct',         org: 'meta',        ctx: 8192,    category: 'llm',       free: true },
-  { id: 'meta/llama3-70b-instruct',                name: 'Llama 3 70B Instruct',        org: 'meta',        ctx: 8192,    category: 'llm',       free: true },
   { id: 'meta/llama-guard-4-12b',                  name: 'Llama Guard 4 12B (Safety)',  org: 'meta',        ctx: 131072,  category: 'safety',    free: true },
 
   // ── DeepSeek AI (ALL 4 are Free Endpoint — verified from build.nvidia.com/deepseek-ai) ──
   { id: 'deepseek-ai/deepseek-v4-flash',           name: 'DeepSeek V4 Flash (284B MoE)', org: 'deepseek-ai',ctx: 1000000, category: 'code',      free: true },
   { id: 'deepseek-ai/deepseek-v4-pro',             name: 'DeepSeek V4 Pro (1M ctx)',    org: 'deepseek-ai', ctx: 1000000, category: 'code',      free: true },
   { id: 'deepseek-ai/deepseek-v3.2',               name: 'DeepSeek V3.2 (685B)',        org: 'deepseek-ai', ctx: 131072,  category: 'llm',       free: true },
-  { id: 'deepseek-ai/deepseek-v3.1-terminus',      name: 'DeepSeek V3.1 Terminus',      org: 'deepseek-ai', ctx: 131072,  category: 'llm',       free: true },
 
   // ── Qwen (Free Endpoint confirmed — from build.nvidia.com/qwen) ───────────
   { id: 'qwen/qwen3-coder-480b-a35b-instruct',     name: 'Qwen3 Coder 480B (Agentic)',  org: 'qwen',        ctx: 262144,  category: 'code',      free: true },
@@ -592,8 +660,6 @@ const NVIDIA_FREE_MODELS = [
   { id: 'nvidia/llama-3.1-nemotron-ultra-253b-v1', name: 'Nemotron Ultra 253B v1',     org: 'nvidia',      ctx: 131072,  category: 'reasoning', free: true },
   { id: 'nvidia/llama-3.3-nemotron-super-49b-v1',  name: 'Nemotron Super 49B v1',      org: 'nvidia',      ctx: 131072,  category: 'llm',       free: true },
   { id: 'nvidia/llama-3.1-nemotron-nano-8b-v1',    name: 'Nemotron Nano 8B v1',        org: 'nvidia',      ctx: 131072,  category: 'llm',       free: true },
-  { id: 'nvidia/nemotron-mini-4b-instruct',         name: 'Nemotron Mini 4B',           org: 'nvidia',      ctx: 4096,    category: 'llm',       free: true },
-  { id: 'nvidia/nemotron-4-340b-instruct',          name: 'Nemotron 4 340B',            org: 'nvidia',      ctx: 4096,    category: 'llm',       free: true },
 
   // ── Z.ai / GLM ────────────────────────────────────────────────────────────
   // NOTE: glm-4.7 returns 404, glm-5.1 times out — removed until NVIDIA fixes them
@@ -605,7 +671,6 @@ const NVIDIA_FREE_MODELS = [
   { id: 'moonshotai/kimi-k2.6',                    name: 'Kimi K2.6 (1T Multimodal)',   org: 'moonshotai',  ctx: 131072,  category: 'multimodal',free: true },
   { id: 'moonshotai/kimi-k2.5',                    name: 'Kimi K2.5 (1T, Long Context)',org: 'moonshotai',  ctx: 131072,  category: 'llm',       free: true },
   { id: 'moonshotai/kimi-k2-thinking',             name: 'Kimi K2 Thinking',            org: 'moonshotai',  ctx: 262144,  category: 'reasoning', free: true },
-  { id: 'moonshotai/kimi-k2-instruct-0905',        name: 'Kimi K2 Instruct 0905',       org: 'moonshotai',  ctx: 262144,  category: 'llm',       free: true },
   { id: 'moonshotai/kimi-k2-instruct',             name: 'Kimi K2 Instruct',            org: 'moonshotai',  ctx: 131072,  category: 'llm',       free: true },
 
   // ── OpenAI GPT-OSS (Free Endpoint confirmed from build.nvidia.com/openai) ─
@@ -629,8 +694,7 @@ const NVIDIA_IMAGE_MODELS = [
   { id: 'black-forest-labs/FLUX.2-klein-4b', name: 'FLUX.2-klein-4b', org: 'black-forest-labs', ctx: 0, category: 'image', free: true },
   { id: 'stabilityai/stable-diffusion-3.5-large', name: 'Stable Diffusion 3.5 Large', org: 'stabilityai', ctx: 0, category: 'image', free: true },
   { id: 'qwen/qwen-image', name: 'Qwen Image', org: 'qwen', ctx: 0, category: 'image', free: true },
-  { id: 'qwen/qwen-image-edit', name: 'Qwen Image Edit', org: 'qwen', ctx: 0, category: 'image', free: true },
-  { id: 'microsoft/TRELLIS', name: 'TRELLIS', org: 'microsoft', ctx: 0, category: 'image', free: true }
+  { id: 'qwen/qwen-image-edit', name: 'Qwen Image Edit', org: 'qwen', ctx: 0, category: 'image', free: true }
 ];
 
 function loadUserModels() {
@@ -704,6 +768,7 @@ app.post('/api/keys', (req, res) => {
   };
   keys.push(newKey);
   saveKeysToEnv();
+  saveRuntimeState();
   addLog({ method: 'META', endpoint: '/api/keys', event: 'key_added', keyMasked: maskKey(newKey.value), label: newKey.label, statusCode: 201 });
   res.status(201).json({ ok: true, id: newKey.id, masked: maskKey(newKey.value) });
 });
@@ -713,6 +778,7 @@ app.delete('/api/keys/:id', (req, res) => {
   if (idx === -1) return res.status(404).json({ error: 'Key not found' });
   const removed = keys.splice(idx, 1)[0];
   saveKeysToEnv();
+  saveRuntimeState();
   addLog({ method: 'META', endpoint: '/api/keys', event: 'key_removed', keyMasked: maskKey(removed.value), statusCode: 200 });
   res.json({ ok: true });
 });
@@ -723,6 +789,7 @@ app.patch('/api/keys/:id', (req, res) => {
   if (typeof req.body.active === 'boolean') k.active = req.body.active;
   if (req.body.label) k.label = req.body.label.trim();
   saveKeysToEnv();
+  saveRuntimeState();
   res.json({ ok: true });
 });
 
@@ -825,13 +892,29 @@ app.post('/api/models/verify', async (req, res) => {
   try {
     let vr;
     if (type === 'image') {
-      vr = await fetch(`${NVIDIA_BASE}/images/generations`, { method:'POST', headers:{'Content-Type':'application/json','Authorization':`Bearer ${key}`}, body: JSON.stringify({ model, prompt:'test image', size:'1024x1024' }) });
+      if (model === 'microsoft/TRELLIS') return res.json({ ok:false, status:400, model, detail:'TRELLIS is not compatible with /images/generations on this proxy.' });
+      const ir = await postImageGeneration(key, { model, prompt:'test image', size:'1024x1024' });
+      vr = ir.res;
     } else {
       vr = await fetch(`${NVIDIA_BASE}/chat/completions`, { method:'POST', headers:{'Content-Type':'application/json','Authorization':`Bearer ${key}`}, body: JSON.stringify({ model, stream:false, max_tokens:8, messages:[{role:'user',content:'say ok'}] }) });
     }
     const txt = await vr.text();
     res.json({ ok: vr.ok, status: vr.status, model, detail: txt.slice(0, 500) });
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
+const modelStatusCache = {};
+
+app.get('/api/models/status', (req, res) => {
+  res.json(modelStatusCache);
+});
+
+app.get('/api/models/supported', async (req, res) => {
+  const key = getActiveKeys()[0]?.value;
+  if (!key) return res.status(503).json({ error: 'No active key' });
+  const ids = await getSupportedModelIds(key);
+  if (!ids) return res.status(502).json({ error: 'Failed to load supported models from NVIDIA' });
+  res.json({ count: ids.size, models: Array.from(ids) });
 });
 
 app.post('/api/models/verify-all', async (req, res) => {
@@ -849,12 +932,15 @@ app.post('/api/models/verify-all', async (req, res) => {
           : { model: m.id, stream: false, max_tokens: 8, messages: [{ role: 'user', content: 'say ok' }] })
       });
       const txt = await vr.text();
-      return { model: m.id, category: m.category, ok: vr.ok, status: vr.status, reason: vr.ok ? 'PASS' : txt.slice(0, 220) };
+      const out = { model: m.id, category: m.category, ok: vr.ok, status: vr.status, reason: vr.ok ? 'PASS' : txt.slice(0, 220) };
+      modelStatusCache[m.id] = { ok: out.ok, status: out.status, ts: new Date().toISOString() };
+      return out;
     } catch (e) {
       return { model: m.id, category: m.category, ok: false, status: 0, reason: e.message };
     }
   }));
   const pass = results.filter(r => r.ok).length;
+  saveRuntimeState();
   res.json({ total: results.length, pass, fail: results.length - pass, results });
 });
 
@@ -878,7 +964,11 @@ async function proxyToNvidia(req, res, endpoint) {
       });
     }
     console.log(`[pipeline] Routing request to pipeline '${slug}'`);
-    return runPipeline(pipeline, req.body.messages || [], res);
+    const wantsPipelineEvents =
+      req.headers['x-pipeline-events'] === '1' ||
+      req.headers['x-client'] === 'nim-proxy-ui' ||
+      req.query.pipeline_events === '1';
+    return runPipeline(pipeline, req.body.messages || [], res, { emitStatusEvents: wantsPipelineEvents, asJson: req.body?.stream !== true });
   }
 
   if (req.body && typeof req.body.model === 'string' && req.body.model.startsWith('router/')) {
@@ -894,12 +984,54 @@ async function proxyToNvidia(req, res, endpoint) {
     const key = getActiveKeys()[0];
     if (!key) return res.status(503).json({ error: { message: 'No active API keys for image generation', type: 'proxy_error', code: 'no_keys' } });
     try {
-      const ir = await fetch(`${NVIDIA_BASE}/images/generations`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key.value}` },
-        body: JSON.stringify({ model: requestedModel, prompt, size: req.body?.size || '1024x1024' })
-      });
-      const data = await ir.json();
+      const supported = await getSupportedModelIds(key.value);
+      if (supported && !supported.has(requestedModel)) {
+        return res.status(400).json({
+          error: {
+            message: `Model '${requestedModel}' is not enabled for your NVIDIA account. Check /api/models/supported for your live allowlist.`,
+            code: 'model_not_enabled_for_account'
+          }
+        });
+      }
+      const irReq = await postImageGeneration(key.value, { model: requestedModel, prompt, size: req.body?.size || req.body?.image_size || '1024x1024', quality: req.body?.quality || 'standard' });
+      const ir = irReq.res;
+      const imgText = await ir.text();
+      let data;
+      try { data = JSON.parse(imgText); }
+      catch {
+        if (ir.status === 404) {
+          try {
+            const chatFallback = await fetch(`${NVIDIA_BASE}/chat/completions`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key.value}` },
+              body: JSON.stringify({
+                model: requestedModel,
+                stream: false,
+                max_tokens: 512,
+                messages: [{ role: 'user', content: `Generate an image for: ${prompt}. Return a markdown image if possible.` }]
+              })
+            });
+            const cf = await chatFallback.json().catch(() => ({}));
+            const fallbackText = cf?.choices?.[0]?.message?.content;
+            if (chatFallback.ok && fallbackText) {
+              const payload = { id: `img-${Date.now()}`, object:'chat.completion', choices:[{ index:0, message:{ role:'assistant', content: fallbackText }, finish_reason:'stop' }] };
+              return res.json(payload);
+            }
+          } catch {}
+          return res.status(400).json({ error: { message: `Image endpoint rejected model '${requestedModel}' (HTTP 404). Your account or region may not have image API enabled yet. Tried NVIDIA image endpoints and chat fallback.`, code: 'image_model_unsupported' } });
+        }
+        return res.status(500).json({ error: { message: `Image API returned non-JSON: ${imgText.slice(0,200)}` } });
+      }
       if (!ir.ok) return res.status(ir.status).json(data);
+      if (data.requestId && data.statusUrl) {
+        for (let i = 0; i < 30; i++) {
+          await new Promise(r => setTimeout(r, 2000));
+          const poll = await fetch(data.statusUrl, { headers: { Authorization: `Bearer ${key.value}` } });
+          const pd = await poll.json().catch(() => ({}));
+          if (pd.status === 'fulfilled' || pd.data) { data = pd; break; }
+          if (pd.status === 'failed') return res.status(500).json({ error: { message: 'Image generation failed' } });
+        }
+      }
       const b64 = data?.data?.[0]?.b64_json;
       const url = data?.data?.[0]?.url;
       const markdownImg = b64 ? `![generated](data:image/png;base64,${b64})` : (url ? `![generated](${url})` : '(no image output)');
@@ -1334,6 +1466,10 @@ app.all('/v1/*splat', (req, res) => {
   proxyToNvidia(req, res, endpoint);
 });
 
+setInterval(() => { saveRuntimeState(); }, 15000);
+process.on('SIGINT', () => { saveRuntimeState(); process.exit(0); });
+process.on('SIGTERM', () => { saveRuntimeState(); process.exit(0); });
+
 // ─── Init & Start ─────────────────────────────────────────────────────────────
 keys = loadKeysFromEnv();
 pipelines = loadPipelines();
@@ -1341,6 +1477,20 @@ logs = loadLogs();
 logIdCounter = logs.reduce((m, l) => Math.max(m, l.id || 0), 0);
 userModels = loadUserModels();
 requestCounter = logs.reduce((m, l) => Math.max(m, l.requestNumber || 0), 0);
+const runtimeState = loadRuntimeState();
+if (runtimeState) {
+  if (typeof runtimeState.requestCounter === 'number') requestCounter = Math.max(requestCounter, runtimeState.requestCounter);
+  if (runtimeState.modelStatusCache && typeof runtimeState.modelStatusCache === 'object') Object.assign(modelStatusCache, runtimeState.modelStatusCache);
+  if (Array.isArray(runtimeState.keys)) {
+    const byId = new Map(runtimeState.keys.map(k => [k.id, k]));
+    keys.forEach(k => {
+      const saved = byId.get(k.id);
+      if (!saved) return;
+      if (typeof saved.active === 'boolean') k.active = saved.active;
+      if (saved.stats && typeof saved.stats === 'object') k.stats = { ...k.stats, ...saved.stats };
+    });
+  }
+}
 
 // ─── Startup Connectivity Check ───────────────────────────────────────────────
 async function checkNvidiaConnectivity() {
