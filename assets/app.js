@@ -9,10 +9,13 @@ let lastArenaResults = [];
 let arenaUseStream = true;
 let lastLogId = 0;
 const CHAT_STORAGE_KEY = 'nim_proxy_chat_history_v1';
+const CHAT_PREFS_KEY = 'nim_proxy_chat_prefs_v1';
+const PIPELINE_DRAFT_KEY = 'nim_proxy_pipeline_draft_v1';
 
 // ─── Init ──────────────────────────────────────────────────────────────────
 async function init() {
   loadChatHistory();
+  loadChatPrefs();
   await Promise.all([refreshHealth(), refreshKeys(), loadModels(), refreshLogs(), loadPipelines()]);
   setupArenaModels();
   startAutoRefresh();
@@ -20,6 +23,29 @@ async function init() {
 
 function saveChatHistory() {
   try { localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(chatHistory)); } catch {}
+}
+
+function saveChatPrefs() {
+  try {
+    localStorage.setItem(CHAT_PREFS_KEY, JSON.stringify({
+      model: document.getElementById('chat-model')?.value || '',
+      max_tokens: document.getElementById('chat-maxtok')?.value || '1024',
+      temperature: document.getElementById('chat-temp')?.value || '0.7',
+      stream: useStream
+    }));
+  } catch {}
+}
+
+function loadChatPrefs() {
+  try {
+    const raw = localStorage.getItem(CHAT_PREFS_KEY);
+    if (!raw) return;
+    const p = JSON.parse(raw);
+    if (p.max_tokens) document.getElementById('chat-maxtok').value = p.max_tokens;
+    if (p.temperature) document.getElementById('chat-temp').value = p.temperature;
+    if (typeof p.stream === 'boolean') useStream = p.stream;
+    if (p.model) selectedModelId = p.model;
+  } catch {}
 }
 
 function loadChatHistory() {
@@ -277,12 +303,14 @@ function populateChatModelSelect(models) {
   sel.innerHTML = models.map(m => `<option value="${esc(m.id)}">${esc(m.name)} — ${esc(m.id)}</option>`).join('');
 if (models.find(m => m.id === selectedModelId)) sel.value = selectedModelId;
   else sel.value = models.find(m => m.id === 'meta/llama-3.3-70b-instruct') ? 'meta/llama-3.3-70b-instruct' : (models[0]?.id || '');
+  saveChatPrefs();
 }
 
 // ─── Chat ──────────────────────────────────────────────────────────────────
 function toggleStream() {
   useStream = !useStream;
   document.getElementById('stream-btn').textContent = 'Stream: ' + (useStream ? 'ON' : 'OFF');
+  saveChatPrefs();
 }
 
 function clearChat() {
@@ -306,7 +334,10 @@ document.addEventListener('DOMContentLoaded', () => {
       streamBtn.style.opacity = isImage ? '0.4' : '1';
       streamBtn.title = isImage ? 'Stream is handled automatically for image models' : '';
     }
+    saveChatPrefs();
   });
+  document.getElementById('chat-maxtok').addEventListener('change', saveChatPrefs);
+  document.getElementById('chat-temp').addEventListener('change', saveChatPrefs);
 });
 
 let currentAbortController = null;
@@ -817,13 +848,19 @@ async function showPipelineForm(pipeline = null) {
     document.getElementById('pf-slug').dataset.editId = pipeline.id;
     document.getElementById('pf-custom-tasks').value = JSON.stringify(pipeline.customTasks || [], null, 2);
   } else {
-    document.getElementById('pf-name').value = '';
-    document.getElementById('pf-slug').value = '';
-    document.getElementById('pf-max').value = '4';
+    const d = loadPipelineDraft();
+    document.getElementById('pf-name').value = d?.name || '';
+    document.getElementById('pf-slug').value = d?.slug || '';
+    document.getElementById('pf-max').value = d?.maxSubtasks || '4';
     delete document.getElementById('pf-slug').dataset.editId;
-    document.getElementById('pf-custom-tasks').value = '[]';
+    document.getElementById('pf-custom-tasks').value = d?.customTasks || '[]';
   }
   document.getElementById('pf-name').focus();
+  ['pf-name', 'pf-slug', 'pf-max', 'pf-custom-tasks'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.oninput = () => savePipelineDraft();
+  });
   document.getElementById('pipeline-form').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
@@ -837,6 +874,21 @@ function autoPipelineSlug() {
   if (!slugEl.dataset.editId) {
     slugEl.value = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48);
   }
+  savePipelineDraft();
+}
+
+function savePipelineDraft() {
+  try {
+    localStorage.setItem(PIPELINE_DRAFT_KEY, JSON.stringify({
+      name: document.getElementById('pf-name')?.value || '',
+      slug: document.getElementById('pf-slug')?.value || '',
+      maxSubtasks: document.getElementById('pf-max')?.value || '4',
+      customTasks: document.getElementById('pf-custom-tasks')?.value || '[]'
+    }));
+  } catch {}
+}
+function loadPipelineDraft() {
+  try { return JSON.parse(localStorage.getItem(PIPELINE_DRAFT_KEY) || 'null'); } catch { return null; }
 }
 
 async function createPipeline() {

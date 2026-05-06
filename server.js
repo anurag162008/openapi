@@ -151,6 +151,8 @@ function recordKeyUsage(id, result, extra = {}) {
 // ─── Internal Model Caller ────────────────────────────────────────────────────
 // Non-streaming call to any NVIDIA model with key rotation + retry
 async function callModel(modelId, messages, maxTokens = 2048, timeoutMs = 90000) {
+  const meta = allCatalogModels().find(m => m.id === modelId);
+  const safeMessages = trimMessagesToContext(messages, meta?.ctx || 131072, Math.max(1024, maxTokens));
   const triedIds = [];
   let lastError = 'No active keys';
   for (let attempt = 0; attempt < Math.min(keys.length || 1, 3); attempt++) {
@@ -163,7 +165,7 @@ async function callModel(modelId, messages, maxTokens = 2048, timeoutMs = 90000)
       const res = await fetch(`${NVIDIA_BASE}/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key.value}` },
-        body: JSON.stringify({ model: modelId, messages, max_tokens: maxTokens, temperature: 0.2, stream: false }),
+        body: JSON.stringify({ model: modelId, messages: safeMessages, max_tokens: maxTokens, temperature: 0.2, stream: false }),
         signal: ctrl.signal
       });
       clearTimeout(timer);
@@ -182,6 +184,28 @@ async function callModel(modelId, messages, maxTokens = 2048, timeoutMs = 90000)
 
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function estimateTokensFromText(s) { return Math.ceil((String(s || '').length || 0) / 4); }
+function estimateMessagesTokens(messages = []) {
+  return (messages || []).reduce((sum, m) => sum + estimateTokensFromText(m?.content) + 8, 0);
+}
+function trimMessagesToContext(messages = [], ctxLimit = 131072, outputReserve = 2048) {
+  const hardLimit = Math.max(1024, ctxLimit - outputReserve);
+  const sys = (messages || []).filter(m => m.role === 'system');
+  const nonSys = (messages || []).filter(m => m.role !== 'system');
+  const kept = [...sys];
+  let budget = hardLimit - estimateMessagesTokens(sys);
+  if (budget < 0) budget = 0;
+  for (let i = nonSys.length - 1; i >= 0; i--) {
+    const m = nonSys[i];
+    const t = estimateMessagesTokens([m]);
+    if (t <= budget || kept.length === sys.length) {
+      kept.splice(sys.length, 0, m);
+      budget -= t;
+      if (budget <= 0) break;
+    }
+  }
+  return kept.length ? kept : messages.slice(-1);
+}
 
 async function callModelWithRetry(modelId, messages, maxTokens = 2048, retries = 2, timeoutMs = 90000) {
   let lastErr = null;
@@ -1059,6 +1083,9 @@ async function proxyToNvidia(req, res, endpoint) {
       if (Array.isArray(c)) return c.length > 0;
       return c != null;
     });
+    const ctxLimit = selectedModelMeta?.ctx || 131072;
+    const reserve = Math.max(1024, parseInt(req.body?.max_tokens || 2048));
+    req.body.messages = trimMessagesToContext(req.body.messages, ctxLimit, reserve);
   }
 
   const logBase = {
