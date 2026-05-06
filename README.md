@@ -216,3 +216,9 @@ curl http://localhost:3000/v1/chat/completions \
 ## License
 
 Free for personal/educational use. Follow NVIDIA NIM API terms of service.
+
+## GitHub Pages deployment (UI only)
+
+This repo includes a GitHub Actions workflow at `.github/workflows/deploy-pages.yml` that publishes the static frontend (`index.html` + `assets/`) to GitHub Pages on every push to `main` or `master`.
+
+> Note: GitHub Pages hosts only static files. The Node.js proxy API (`/api/*`, `/v1/*`) from `server.js` is **not** run on Pages.
