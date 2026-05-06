@@ -43,6 +43,7 @@ const ENV_FILE = path.join(__dirname, '.env');
 const PIPELINES_FILE = path.join(__dirname, 'pipelines.json');
 const LOGS_FILE = path.join(__dirname, 'logs.local.json');
 const USER_MODELS_FILE = path.join(__dirname, 'user_models.local.json');
+const STATE_FILE = path.join(__dirname, 'state.local.json');
 const MAX_LOGS = 1000;
 const PIPELINE_MAX_CONCURRENCY = parseInt(process.env.PIPELINE_MAX_CONCURRENCY || '3');
 const PIPELINE_PLANNER_TIMEOUT_MS = parseInt(process.env.PIPELINE_PLANNER_TIMEOUT_MS || '90000');
@@ -594,6 +595,26 @@ function saveLogs() {
   catch (e) { console.error('[logs] Save failed:', e.message); return false; }
 }
 
+function loadRuntimeState() {
+  try {
+    if (!fs.existsSync(STATE_FILE)) return null;
+    const raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    return raw && typeof raw === 'object' ? raw : null;
+  } catch (e) { console.error('[state] Load failed:', e.message); return null; }
+}
+
+function saveRuntimeState() {
+  try {
+    const state = {
+      requestCounter,
+      modelStatusCache,
+      keys: keys.map(k => ({ id: k.id, active: !!k.active, stats: k.stats || {} }))
+    };
+    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
+    return true;
+  } catch (e) { console.error('[state] Save failed:', e.message); return false; }
+}
+
 // ─── NVIDIA Free Tier Models ──────────────────────────────────────────────────
 // Source: build.nvidia.com — only "Free Endpoint" tagged models (verified May 2025)
 // Model IDs match exactly what build.nvidia.com page URLs show: /<org>/<model-slug>
@@ -747,6 +768,7 @@ app.post('/api/keys', (req, res) => {
   };
   keys.push(newKey);
   saveKeysToEnv();
+  saveRuntimeState();
   addLog({ method: 'META', endpoint: '/api/keys', event: 'key_added', keyMasked: maskKey(newKey.value), label: newKey.label, statusCode: 201 });
   res.status(201).json({ ok: true, id: newKey.id, masked: maskKey(newKey.value) });
 });
@@ -756,6 +778,7 @@ app.delete('/api/keys/:id', (req, res) => {
   if (idx === -1) return res.status(404).json({ error: 'Key not found' });
   const removed = keys.splice(idx, 1)[0];
   saveKeysToEnv();
+  saveRuntimeState();
   addLog({ method: 'META', endpoint: '/api/keys', event: 'key_removed', keyMasked: maskKey(removed.value), statusCode: 200 });
   res.json({ ok: true });
 });
@@ -766,6 +789,7 @@ app.patch('/api/keys/:id', (req, res) => {
   if (typeof req.body.active === 'boolean') k.active = req.body.active;
   if (req.body.label) k.label = req.body.label.trim();
   saveKeysToEnv();
+  saveRuntimeState();
   res.json({ ok: true });
 });
 
@@ -916,6 +940,7 @@ app.post('/api/models/verify-all', async (req, res) => {
     }
   }));
   const pass = results.filter(r => r.ok).length;
+  saveRuntimeState();
   res.json({ total: results.length, pass, fail: results.length - pass, results });
 });
 
@@ -1441,6 +1466,10 @@ app.all('/v1/*splat', (req, res) => {
   proxyToNvidia(req, res, endpoint);
 });
 
+setInterval(() => { saveRuntimeState(); }, 15000);
+process.on('SIGINT', () => { saveRuntimeState(); process.exit(0); });
+process.on('SIGTERM', () => { saveRuntimeState(); process.exit(0); });
+
 // ─── Init & Start ─────────────────────────────────────────────────────────────
 keys = loadKeysFromEnv();
 pipelines = loadPipelines();
@@ -1448,6 +1477,20 @@ logs = loadLogs();
 logIdCounter = logs.reduce((m, l) => Math.max(m, l.id || 0), 0);
 userModels = loadUserModels();
 requestCounter = logs.reduce((m, l) => Math.max(m, l.requestNumber || 0), 0);
+const runtimeState = loadRuntimeState();
+if (runtimeState) {
+  if (typeof runtimeState.requestCounter === 'number') requestCounter = Math.max(requestCounter, runtimeState.requestCounter);
+  if (runtimeState.modelStatusCache && typeof runtimeState.modelStatusCache === 'object') Object.assign(modelStatusCache, runtimeState.modelStatusCache);
+  if (Array.isArray(runtimeState.keys)) {
+    const byId = new Map(runtimeState.keys.map(k => [k.id, k]));
+    keys.forEach(k => {
+      const saved = byId.get(k.id);
+      if (!saved) return;
+      if (typeof saved.active === 'boolean') k.active = saved.active;
+      if (saved.stats && typeof saved.stats === 'object') k.stats = { ...k.stats, ...saved.stats };
+    });
+  }
+}
 
 // ─── Startup Connectivity Check ───────────────────────────────────────────────
 async function checkNvidiaConnectivity() {
