@@ -1,0 +1,24 @@
+name: Deploy backend server
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  deploy-render:
+    if: ${{ secrets.RENDER_DEPLOY_HOOK_URL != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Render deploy hook
+        run: |
+          curl -fsSL -X POST "$RENDER_DEPLOY_HOOK_URL"
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+
+  skip-note:
+    if: ${{ secrets.RENDER_DEPLOY_HOOK_URL == '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Missing secret notice
+        run: echo "RENDER_DEPLOY_HOOK_URL is not set; backend deploy skipped."

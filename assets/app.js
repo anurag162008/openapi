@@ -12,6 +12,10 @@ const CHAT_STORAGE_KEY = 'nim_proxy_chat_history_v1';
 const CHAT_PREFS_KEY = 'nim_proxy_chat_prefs_v1';
 const PIPELINE_DRAFT_KEY = 'nim_proxy_pipeline_draft_v1';
 
+const RAW_API_BASE = (window.NIM_PROXY_API_BASE || localStorage.getItem('nim_proxy_api_base') || '').trim();
+const API_BASE = RAW_API_BASE.replace(/\/$/, '');
+const endpoint = (path) => API_BASE ? `${API_BASE}${path}` : path;
+
 // ─── Init ──────────────────────────────────────────────────────────────────
 async function init() {
   loadChatHistory();
@@ -408,7 +412,7 @@ async function sendChat() {
     if (useStream) {
       // Show pipeline progress overlay if using a pipeline model
       if (model.startsWith('pipeline/')) showPipelineProgress();
-      const res = await fetch('/v1/chat/completions', {
+      const res = await fetch(endpoint('/v1/chat/completions'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer proxy', 'X-Client': 'nim-proxy-ui', 'X-Pipeline-Events': '1' },
         body: JSON.stringify(body),
@@ -489,7 +493,7 @@ async function sendChat() {
       }
 
     } else {
-      const res = await fetch('/v1/chat/completions', {
+      const res = await fetch(endpoint('/v1/chat/completions'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer proxy', 'X-Client': 'nim-proxy-ui', 'X-Pipeline-Events': '1' },
         body: JSON.stringify(body),
@@ -740,7 +744,7 @@ async function verifyAllBatched() {
     const batch = toCheck.slice(i, i+BATCH_SIZE);
     await Promise.all(batch.map(async (m) => {
       try {
-        const res = await fetch('/api/models/verify', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ model:m.id, type:'chat' }), signal: AbortSignal.timeout(15000) });
+        const res = await fetch(endpoint('/api/models/verify'), { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ model:m.id, type:'chat' }), signal: AbortSignal.timeout(15000) });
         const data = await res.json().catch(() => ({ ok:false, status:0 }));
         verifyStatus.set(m.id, { ok: !!data.ok, status: data.status, ts: Date.now() });
         updateModelCardStatus(m.id, !!data.ok);
@@ -760,7 +764,7 @@ async function verifyAllBatched() {
 async function api(path, method='GET', body=null) {
   const opts = { method, headers: { 'Content-Type': 'application/json' } };
   if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(path, opts);
+  const res = await fetch(endpoint(path), opts);
   const text = await res.text();
   let data = {};
   try {
@@ -968,7 +972,7 @@ async function runArenaForModel(model, prompt, idx) {
   const card = document.getElementById(`arena-card-${idx}`);
   const pre = document.getElementById(`arena-pre-${idx}`);
   try {
-    const res = await fetch('/v1/chat/completions', {
+    const res = await fetch(endpoint('/v1/chat/completions'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer proxy' },
       body: JSON.stringify({ model, stream: arenaUseStream, messages: [{ role: 'user', content: prompt }] })
